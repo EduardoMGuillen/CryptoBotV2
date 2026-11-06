@@ -85,7 +85,7 @@ class App:
         self.bot.notify = self._notify
 
     def _notify(self, event: dict) -> None:
-        threading.Thread(target=self.telegram.send, args=(notify.message(event),), daemon=True).start()
+        threading.Thread(target=self.telegram.send, args=(notify.message(event),), daemon=False).start()
 
     # ---- datos ------------------------------------------------------------------------------
 

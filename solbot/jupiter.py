@@ -85,20 +85,36 @@ class Jupiter:
         raise JupiterError(f"Jupiter no respondió a la cotización tras {self.retries} intentos ({problem}).")
 
     def execute(self, signed_tx: str, request_id: str) -> dict:
+        """Nunca lanza: devuelve la respuesta de Jupiter, o status "Unknown" si no se puede saber
+        si la transacción salió. Un rechazo (4xx) solo cuenta como "Failed" si ningún intento
+        anterior pudo haber llegado a Jupiter."""
         body = {"signedTransaction": signed_tx, "requestId": request_id}
         problem = "sin respuesta"
+        maybe_sent = False
         for attempt in range(1, self.retries + 1):
             try:
                 resp = self.session.post(f"{self.base}/execute", json=body, headers=self.headers, timeout=60)
             except requests.RequestException as exc:
                 problem = type(exc).__name__
+                maybe_sent = True
                 self.sleep(2.0 * attempt)
                 continue
-            if resp.status_code == 429 or resp.status_code >= 500:
+            if resp.status_code == 429:
+                problem = "HTTP 429"
+                self.sleep(2.0 * attempt)
+                continue
+            if resp.status_code >= 500:
                 problem = f"HTTP {resp.status_code}"
+                maybe_sent = True
                 self.sleep(2.0 * attempt)
                 continue
             if resp.status_code >= 400:
+                if maybe_sent:
+                    return {"status": "Unknown", "error": f"Un intento anterior pudo llegar ({problem}) y el siguiente fue rechazado (HTTP {resp.status_code})."}
                 return {"status": "Failed", "code": resp.status_code, "error": resp.text[:300]}
-            return resp.json()
+            try:
+                data = resp.json()
+            except ValueError:
+                return {"status": "Unknown", "error": "Jupiter respondió algo que no es JSON."}
+            return data if isinstance(data, dict) else {"status": "Unknown", "error": "Respuesta inesperada de Jupiter."}
         return {"status": "Unknown", "error": f"/execute no respondió tras {self.retries} intentos ({problem})."}

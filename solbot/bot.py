@@ -131,10 +131,13 @@ class Bot:
                 return state
             if executed:
                 sleeve = Sleeve(**state["sleeve"])
+                quote_out, ref = pending.get("quote_out"), pending["reference_price"]
                 if pending["side"] == "buy":
-                    sol, usdc = pending["quote_out"] / 1e9, pending["amount"] / 1e6
+                    usdc = pending["amount"] / 1e6
+                    sol = quote_out / 1e9 if quote_out else usdc / ref
                 else:
-                    sol, usdc = pending["amount"] / 1e9, pending["quote_out"] / 1e6
+                    sol = pending["amount"] / 1e9
+                    usdc = quote_out / 1e6 if quote_out else sol * ref
                 fill = Fill(pending["side"], sol, usdc, usdc / sol, 0.0, pending.get("signature") or pending.get("tx_id"), "confirmada a mano")
                 state["sleeve"] = asdict(apply_fill(sleeve, fill))
                 state["trades"].append(self._trade_record(pending["bar"], fill))
@@ -182,12 +185,22 @@ class Bot:
             return "waiting"
 
         bar = None
-        intent = None
         sent = False
+
+        def on_send(pending: dict) -> None:
+            """Anota la orden en disco justo antes de enviarla. Si el proceso muere a mitad de
+            /execute, al volver queda como pendiente y nunca se repite. Si no se puede guardar,
+            la excepción sube y la orden no sale."""
+            nonlocal sent
+            state["pending"] = {**pending, "in_flight": True, "at": now.isoformat(),
+                                "message": "Orden enviada a Jupiter; esperando su respuesta."}
+            self.store.save(state)
+            sent = True
+
         try:
             df = self.candles()
             bar = df.index[-1].date().isoformat()
-            if state["last_bar"] == bar:
+            if state["last_bar"] and bar <= state["last_bar"]:
                 return "up_to_date"
             price = float(self.price())
             if state["sleeve"] is None:
@@ -199,8 +212,8 @@ class Bot:
             decision = plan(self.strategy, df, sleeve, price, self.min_trade_usd, self.max_trade_usd)
             if decision["action"] in ("buy", "sell"):
                 intent = intent_for(decision)
-                sent = True  # desde aquí, un error inesperado puede significar que la orden sí salió
-                fill = self.executor.execute(intent, sleeve)
+                fill = self.executor.execute(intent, sleeve, on_send=on_send)
+                state["pending"] = None
                 sleeve = apply_fill(sleeve, fill)
                 state["sleeve"] = asdict(sleeve)
                 state["trades"] = (state["trades"] + [self._trade_record(bar, fill)])[-MAX_TRADES_KEPT:]
@@ -217,8 +230,10 @@ class Bot:
             return decision["action"]
 
         except RetryLater as exc:
+            state["pending"] = None  # el ejecutor confirmó que la orden no llegó a la cadena
             return self._retry(state, now, bar, str(exc))
         except Refused as exc:
+            state["pending"] = None
             state["notice"] = f"Orden cancelada: {exc}"
             self._emit({"kind": "refused", "message": str(exc)})
             if state["sleeve"] is None:  # no hubo fondos que administrar: requiere acción del usuario
@@ -230,13 +245,15 @@ class Bot:
         except Unknown as exc:
             return self._pause_unknown(state, now, str(exc), exc.pending)
         except Exception as exc:  # error inesperado (red, datos, bug)
-            if sent and self.executor.mode == "live":
-                pending = {"id": intent.id, "bar": intent.bar, "side": intent.side, "amount": intent.amount,
-                           "quote_out": None, "reference_price": intent.reference_price}
-                return self._pause_unknown(state, now, f"Error inesperado después de enviar la orden: {exc!r}", pending)
+            if sent:
+                return self._pause_unknown(state, now, f"Error inesperado después de enviar la orden: {exc!r}", state["pending"])
+            state["pending"] = None
             return self._retry(state, now, bar, f"Error inesperado: {exc!r}")
 
     def _retry(self, state: dict, now: pd.Timestamp, bar: str | None, message: str) -> str:
+        if state.get("attempt_bar") != bar:  # los fallos de otra vela no gastan los intentos de esta
+            state["attempt_bar"] = bar
+            state["attempts"] = 0
         state["attempts"] = state.get("attempts", 0) + 1
         state["error"] = message
         if bar and state["attempts"] >= self.max_attempts:
@@ -248,7 +265,7 @@ class Bot:
         return "retry"
 
     def _pause_unknown(self, state: dict, now: pd.Timestamp, message: str, pending: dict) -> str:
-        state["pending"] = {**pending, "message": message, "at": now.isoformat()}
+        state["pending"] = {**(pending or {}), "in_flight": False, "message": message, "at": now.isoformat()}
         state["running"] = False
         state["notice"] = message
         self.store.journal({"event": "unknown", **state["pending"]})

@@ -11,6 +11,9 @@ from .jupiter import JupiterError, order_price
 from .orders import Intent, Sleeve
 
 TOLERANCE = 1e-6
+# SOL mínimo para pagar comisiones de red. Las comisiones salen de la reserva, así que la
+# reserva baja un poco con cada operación: comprar solo exige poder pagar la comisión.
+FEE_FLOOR_SOL = 0.005
 
 
 def check_order(order: dict, intent: Intent, taker: str, limits: LiveLimits) -> list[str]:
@@ -68,6 +71,6 @@ def check_wallet(intent: Intent, wallet_sol: float, wallet_usdc: float, sleeve: 
     else:
         if wallet_usdc + TOLERANCE < intent.amount_ui:
             problems.append(f"La wallet tiene {wallet_usdc:.2f} USDC y la orden necesita {intent.amount_ui:.2f} USDC.")
-        if wallet_sol + TOLERANCE < reserve:
-            problems.append(f"La wallet tiene {wallet_sol:.4f} SOL; hacen falta al menos {reserve} SOL para comisiones.")
+        if wallet_sol + TOLERANCE < FEE_FLOOR_SOL:
+            problems.append(f"La wallet tiene {wallet_sol:.4f} SOL; hacen falta al menos {FEE_FLOOR_SOL} SOL para comisiones.")
     return problems

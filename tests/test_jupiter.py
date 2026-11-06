@@ -133,3 +133,24 @@ def test_execute_without_any_answer_reports_unknown_instead_of_failed():
 ])
 def test_price_of_an_order_is_usdc_per_sol(order, price):
     assert jup.order_price(order) == pytest.approx(price)
+
+
+def test_a_rejection_after_a_lost_attempt_is_unknown_not_failed():
+    # El primer envío pudo haber llegado; que el segundo sea rechazado no prueba que no se ejecutó.
+    session = FakeSession(requests.Timeout("slow"), FakeResponse(400, {"error": "Invalid"}))
+    assert client(session).execute("SIGNED", "req-1")["status"] == "Unknown"
+
+
+def test_a_rejection_on_the_first_attempt_is_a_failure():
+    session = FakeSession(FakeResponse(400, {"error": "Invalid signed transaction"}))
+    assert client(session).execute("SIGNED", "req-1")["status"] == "Failed"
+
+
+class NotJson(FakeResponse):
+    def json(self):
+        raise ValueError("no es JSON")
+
+
+def test_an_answer_that_is_not_json_is_unknown():
+    session = FakeSession(NotJson(200, None))
+    assert client(session).execute("SIGNED", "req-1")["status"] == "Unknown"

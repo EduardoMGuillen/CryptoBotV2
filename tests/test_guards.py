@@ -70,5 +70,12 @@ def test_buying_needs_the_usdc_and_sol_for_fees():
     assert guards.check_wallet(buy, wallet_sol=0.05, wallet_usdc=20.0, sleeve=Sleeve(0, 20.0), limits=LIMITS) == []
     no_usdc = guards.check_wallet(buy, wallet_sol=0.05, wallet_usdc=5.0, sleeve=Sleeve(0, 20.0), limits=LIMITS)
     assert any("USDC" in p for p in no_usdc)
-    no_fees = guards.check_wallet(buy, wallet_sol=0.01, wallet_usdc=20.0, sleeve=Sleeve(0, 20.0), limits=LIMITS)
+    no_fees = guards.check_wallet(buy, wallet_sol=0.001, wallet_usdc=20.0, sleeve=Sleeve(0, 20.0), limits=LIMITS)
     assert any("comisiones" in p for p in no_fees)
+
+
+def test_buying_only_needs_sol_for_fees_not_the_whole_reserve():
+    # Las comisiones de cada operación salen de la reserva; comprar no debe bloquearse por eso.
+    buy = Intent(id="b", bar="2026-11-05", side="buy", input_mint=USDC_MINT, output_mint=SOL_MINT,
+                 amount=20_000_000, amount_ui=20.0, usd=20.0, reference_price=90.0)
+    assert guards.check_wallet(buy, wallet_sol=0.0299, wallet_usdc=20.0, sleeve=Sleeve(0, 20.0), limits=LIMITS) == []

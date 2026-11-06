@@ -16,6 +16,7 @@ La llave solo se abre en el paso 7: si algo falla antes, nunca se toca.
 
 from __future__ import annotations
 
+import dataclasses
 import math
 from typing import Callable
 
@@ -30,6 +31,8 @@ LANDED = ("processed", "confirmed", "finalized")
 # Códigos de /execute en los que la transacción no llegó a la cadena y vale la pena reintentar con
 # una cotización nueva: no aterrizó, venció el bloque o venció la cotización del market maker.
 RETRYABLE_CODES = {-1000, -1004, -1005, -2000, -2003}
+# Al tomar fondos se deja este colchón además de la reserva: cubre cientos de comisiones de red.
+FEE_BUFFER_SOL = 0.005
 
 
 def _route(order: dict) -> str:
@@ -62,7 +65,7 @@ class PaperExecutor:
     def fund(self, price: float) -> Sleeve:
         return Sleeve(sol=0.0, usdc=self.start_usd)
 
-    def execute(self, intent: Intent, sleeve: Sleeve) -> Fill:
+    def execute(self, intent: Intent, sleeve: Sleeve, on_send: Callable[[dict], None] | None = None) -> Fill:
         try:
             order = self.jupiter.order(intent.input_mint, intent.output_mint, intent.amount)
         except JupiterError as exc:
@@ -116,7 +119,7 @@ class LiveExecutor:
         La reserva de SOL nunca entra."""
         sol, usdc = self.wallet()
         take_usdc = min(usdc, self.limits.budget_usd)
-        free_sol = max(0.0, sol - self.limits.min_sol_reserve)
+        free_sol = max(0.0, sol - self.limits.min_sol_reserve - FEE_BUFFER_SOL)
         take_sol = min(free_sol, max(0.0, self.limits.budget_usd - take_usdc) / price)
         sleeve = Sleeve(sol=math.floor(take_sol * 1e9) / 1e9, usdc=math.floor(take_usdc * 1e6) / 1e6)
         if sleeve.value(price) < 1.0:
@@ -126,8 +129,8 @@ class LiveExecutor:
             )
         return sleeve
 
-    def _prepare(self, intent: Intent, sleeve: Sleeve, *, count_today: bool) -> dict:
-        """Pasos 1 a 5: devuelve una cotización validada y simulada, lista para firmar."""
+    def _prepare(self, intent: Intent, sleeve: Sleeve, *, count_today: bool) -> tuple[Intent, dict]:
+        """Pasos 1 a 5: devuelve la orden (quizá reducida) y su cotización validada y simulada."""
         if self._kill():
             raise Refused("Parada de emergencia activa (archivo KILL).")
         if count_today:
@@ -136,6 +139,17 @@ class LiveExecutor:
                 raise Refused(f"Ya se hicieron {done_today} operaciones hoy; el máximo por día es {self.limits.max_trades_per_day}.")
 
         sol, usdc = self.wallet()
+        free = sol - self.limits.min_sol_reserve
+        if intent.side == "sell" and sol + 1e-9 >= sleeve.sol and intent.amount_ui > free + 1e-9:
+            # Vender todo tocaría la reserva (las comisiones ya la gastaron un poco): se vende lo libre.
+            lamports = math.floor(max(0.0, free) * 1e9)
+            if lamports / 1e9 * intent.reference_price < 1.0:
+                raise Refused(
+                    f"No hay SOL libre para vender sin tocar la reserva de {self.limits.min_sol_reserve} SOL "
+                    f"(la wallet tiene {sol:.4f} SOL). Agrega SOL a la wallet para las comisiones."
+                )
+            intent = dataclasses.replace(intent, amount=lamports, amount_ui=lamports / 1e9,
+                                         usd=lamports / 1e9 * intent.reference_price)
         problems = check_wallet(intent, sol, usdc, sleeve, self.limits)
         if problems:
             raise Refused(" ".join(problems))
@@ -154,11 +168,11 @@ class LiveExecutor:
             raise RetryLater(f"No se pudo simular la transacción: {exc}") from None
         if simulation:
             raise Refused(f"La simulación de la transacción falló: {simulation}")
-        return order
+        return intent, order
 
     def rehearse(self, intent: Intent, sleeve: Sleeve) -> dict:
         """Todo el camino de una orden real con la wallet de verdad, salvo enviarla."""
-        order = self._prepare(intent, sleeve, count_today=False)
+        intent, order = self._prepare(intent, sleeve, count_today=False)
         try:
             signed = sign_partial(order["transaction"], self.load_key())
         except WalletError as exc:
@@ -176,8 +190,8 @@ class LiveExecutor:
             "signature_ok": verify_own_signature(signed, self.address),
         }
 
-    def execute(self, intent: Intent, sleeve: Sleeve) -> Fill:
-        order = self._prepare(intent, sleeve, count_today=True)
+    def execute(self, intent: Intent, sleeve: Sleeve, on_send: Callable[[dict], None] | None = None) -> Fill:
+        intent, order = self._prepare(intent, sleeve, count_today=True)
 
         self.journal({
             "event": "intent", "id": intent.id, "side": intent.side, "amount": intent.amount,
@@ -189,17 +203,31 @@ class LiveExecutor:
         except WalletError as exc:
             raise Refused(f"No se pudo firmar: {exc}") from None
         tx_id = transaction_id(signed)
-        self.journal({"event": "signed", "id": intent.id, "tx_id": tx_id})
-
-        result = self.jupiter.execute(signed, order["requestId"])
-        self.journal({"event": "result", "id": intent.id,
-                      **{k: result.get(k) for k in ("status", "code", "error", "signature", "totalInputAmount", "totalOutputAmount")}})
-
         pending = {
             "id": intent.id, "bar": intent.bar, "side": intent.side, "amount": intent.amount,
             "quote_out": int(order["outAmount"]), "reference_price": intent.reference_price,
-            "request_id": order.get("requestId"), "tx_id": tx_id, "signature": result.get("signature"),
+            "request_id": order.get("requestId"), "tx_id": tx_id, "signature": None,
         }
+        self.journal({"event": "signed", "id": intent.id, "tx_id": tx_id})
+        if on_send:
+            on_send(pending)  # deja la orden anotada en el estado; si no se puede guardar, no se envía
+
+        # Desde aquí la orden pudo haber salido: cualquier sorpresa es "resultado incierto".
+        try:
+            result = self.jupiter.execute(signed, order["requestId"])
+        except Exception as exc:
+            raise Unknown(f"No se sabe si la orden se ejecutó ({type(exc).__name__}). Revisa la wallet en Solscan.", pending) from None
+        pending["signature"] = result.get("signature") if isinstance(result, dict) else None
+        try:
+            self.journal({"event": "result", "id": intent.id,
+                          **{k: result.get(k) for k in ("status", "code", "error", "signature", "totalInputAmount", "totalOutputAmount")}})
+            return self._settle(intent, order, result, pending, tx_id)
+        except (Refused, RetryLater, Unknown):
+            raise
+        except Exception as exc:
+            raise Unknown(f"La orden se envió pero su respuesta no se pudo procesar ({exc!r}). Revisa la wallet en Solscan.", pending) from None
+
+    def _settle(self, intent: Intent, order: dict, result: dict, pending: dict, tx_id: str | None) -> Fill:
         status = result.get("status")
         if status == "Success":
             amount_in = int(result.get("totalInputAmount") or result.get("inputAmountResult") or intent.amount)
@@ -218,6 +246,7 @@ class LiveExecutor:
             if landed in LANDED:
                 raise Unknown(f"Jupiter reportó un fallo, pero la transacción aparece «{landed}» en la cadena. Revisa en Solscan.", pending)
             if result.get("code") in RETRYABLE_CODES:
+                # El reintento llega minutos después: para entonces la transacción vieja ya venció.
                 raise RetryLater(f"La orden no llegó a la cadena ({result.get('error')}); se reintenta con una cotización nueva.")
             raise Refused(f"Jupiter no pudo ejecutar la orden (código {result.get('code')}): {result.get('error')}")
 

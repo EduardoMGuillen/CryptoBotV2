@@ -34,7 +34,7 @@ class FakeExecutor:
     def fund(self, price):
         return Sleeve(sol=0.0, usdc=1000.0)
 
-    def execute(self, intent, sleeve):
+    def execute(self, intent, sleeve, on_send=None):
         self.intents.append(intent)
         if self.fail_with:
             error, self.fail_with = self.fail_with, None
@@ -168,9 +168,16 @@ def test_confirming_that_an_unknown_order_did_execute_books_it_once(tmp_path):
     assert len(executor.intents) == 1  # no vuelve a comprar la misma señal
 
 
+class SendThenBreak(FakeExecutor):
+    def execute(self, intent, sleeve, on_send=None):
+        self.intents.append(intent)
+        on_send({"id": intent.id, "bar": intent.bar, "side": intent.side, "amount": intent.amount,
+                 "quote_out": 1, "reference_price": intent.reference_price, "request_id": "r"})
+        raise KeyError("signature")
+
+
 def test_an_unexpected_error_after_sending_a_live_order_pauses_instead_of_retrying(tmp_path):
-    executor = FakeExecutor(mode="live")
-    executor.fail_with = KeyError("signature")
+    executor = SendThenBreak(mode="live")
     bot, store, _, _ = make_bot(tmp_path, executor=executor)
     bot.set_running(True)
     bot.cycle()
@@ -213,3 +220,72 @@ def test_an_unknown_outcome_is_reported_right_away(tmp_path):
     bot.notify = events.append
     bot.cycle()
     assert [e["kind"] for e in events] == ["unknown"]
+
+
+class SendThenCrash(FakeExecutor):
+    """Imita un proceso que muere a mitad de /execute: anota la orden y no vuelve."""
+
+    def execute(self, intent, sleeve, on_send=None):
+        self.intents.append(intent)
+        on_send({"id": intent.id, "bar": intent.bar, "side": intent.side, "amount": intent.amount,
+                 "quote_out": 80_000_000_000, "reference_price": intent.reference_price, "request_id": "r"})
+        raise SystemExit("proceso detenido")
+
+
+def test_a_crash_while_an_order_is_in_flight_never_trades_that_signal_again(tmp_path):
+    executor = SendThenCrash(mode="live")
+    bot, store, _, _ = make_bot(tmp_path, executor=executor)
+    bot.set_running(True)
+    with pytest.raises(SystemExit):
+        bot.cycle()
+    bot.cycle()  # el bot vuelve a arrancar
+    assert len(executor.intents) == 1
+    assert store.load()["pending"]["request_id"] == "r"
+
+
+def test_a_failure_before_sending_retries_instead_of_pausing(tmp_path):
+    executor = FakeExecutor(mode="live")
+    executor.fail_with = ValueError("respuesta que no es JSON")
+    bot, store, _, _ = make_bot(tmp_path, executor=executor)
+    bot.set_running(True)
+    bot.cycle()
+    state = store.load()
+    assert state["running"] is True and state["pending"] is None
+    assert state["outcome"] == "retry"
+
+
+def test_an_older_candle_than_the_last_decision_is_ignored(tmp_path):
+    bot, store, executor, feed = make_bot(tmp_path)
+    bot.cycle()  # decide con 2024-01-03
+    feed.update(df=frame([10, 11]))  # llega una lectura vieja que termina el 2024-01-02
+    bot.cycle()
+    assert len(executor.intents) == 1
+    assert store.load()["last_bar"] == "2024-01-03"
+
+
+def test_failures_before_a_new_candle_do_not_use_up_its_retries(tmp_path):
+    clock = Clock()
+    bot, store, executor, feed = make_bot(tmp_path, clock=clock)
+    good = feed["df"]
+
+    def broken():
+        raise ConnectionError("Binance caído")
+
+    bot.candles = broken
+    for _ in range(6):
+        bot.cycle()
+        clock.now += pd.Timedelta(minutes=6)
+    bot.candles = lambda: good
+    executor.fail_with = RetryLater("Jupiter no respondió")
+    bot.cycle()
+    assert store.load()["outcome"] == "retry"
+
+
+def test_confirming_an_order_without_quote_amounts_uses_the_reference_price(tmp_path):
+    executor = FakeExecutor()
+    executor.fail_with = Unknown("sin respuesta", {"request_id": "r", "bar": "2024-01-03", "side": "buy",
+                                                    "amount": 120_000_000, "quote_out": None, "reference_price": 12.0})
+    bot, store, _, _ = make_bot(tmp_path, executor=executor)
+    bot.cycle()
+    bot.resolve_pending(executed=True)
+    assert store.load()["sleeve"]["sol"] == pytest.approx(10.0)  # 120 USDC / 12

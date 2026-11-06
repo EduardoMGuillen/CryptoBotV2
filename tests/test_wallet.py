@@ -88,3 +88,9 @@ def test_signature_of_a_fee_paying_wallet_is_the_transaction_id():
     tx = VersionedTransaction.from_bytes(base64.b64decode(signed))
     assert wallet.transaction_id(signed) == str(tx.signatures[0])
     assert tx.signatures[0].verify(me.pubkey(), to_bytes_versioned(tx.message))
+
+
+def test_an_rfq_transaction_has_no_id_until_the_market_maker_signs():
+    me, market_maker = Keypair(), Keypair()
+    signed = wallet.sign_partial(unsigned_tx(market_maker.pubkey(), me.pubkey()), me)
+    assert wallet.transaction_id(signed) is None

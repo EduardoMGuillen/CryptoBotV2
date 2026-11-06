@@ -8,6 +8,8 @@ ejecución siempre lo da Jupiter.
 from __future__ import annotations
 
 import json
+import os
+import threading
 from pathlib import Path
 
 import pandas as pd
@@ -68,9 +70,16 @@ def _read_cache(path: Path) -> pd.DataFrame:
     return df[COLUMNS].astype(float)
 
 
+_LOAD_LOCK = threading.Lock()
+
+
 def load_daily(symbol: str, path: Path, session=None, now=None, since: pd.Timestamp = SOL_LISTING) -> pd.DataFrame:
     """Velas diarias cerradas, desde la caché en disco; solo descarga los días que faltan."""
-    path = Path(path)
+    with _LOAD_LOCK:  # el ciclo del bot y la interfaz pueden pedirlas a la vez
+        return _load_daily(symbol, Path(path), session, now, since)
+
+
+def _load_daily(symbol: str, path: Path, session, now, since: pd.Timestamp) -> pd.DataFrame:
     now = now or _now()
     cached = _read_cache(path) if path.exists() else pd.DataFrame(columns=COLUMNS)
     if not cached.empty and cached.index[-1] >= last_closed_day(now):
@@ -82,9 +91,9 @@ def load_daily(symbol: str, path: Path, session=None, now=None, since: pd.Timest
     merged = merged[~merged.index.duplicated(keep="last")].sort_index()
 
     path.parent.mkdir(parents=True, exist_ok=True)
-    temp = path.with_suffix(".tmp")
+    temp = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
     merged.to_csv(temp)
-    temp.replace(path)
+    temp.replace(path)  # atómico: quien lea ve el archivo viejo o el nuevo, nunca uno a medias
     return merged
 
 

@@ -18,6 +18,7 @@ from pathlib import Path
 from solders.keypair import Keypair
 from solders.message import to_bytes_versioned
 from solders.pubkey import Pubkey
+from solders.signature import Signature
 from solders.transaction import VersionedTransaction
 
 
@@ -97,6 +98,8 @@ def verify_own_signature(tx_b64: str, address: str) -> bool:
     return tx.signatures[signers.index(me)].verify(me, to_bytes_versioned(message))
 
 
-def transaction_id(tx_b64: str) -> str:
-    """En Solana el id de una transacción es su primera firma (la de quien paga la comisión)."""
-    return str(_decode(tx_b64).signatures[0])
+def transaction_id(tx_b64: str) -> str | None:
+    """En Solana el id de una transacción es su primera firma (la de quien paga la comisión).
+    En una orden RFQ la paga el market maker y firma después: hasta entonces no hay id."""
+    first = _decode(tx_b64).signatures[0]
+    return None if first == Signature.default() else str(first)

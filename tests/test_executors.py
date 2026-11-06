@@ -155,11 +155,20 @@ def test_daily_trade_limit_stops_new_orders():
     assert jupiter.orders == []
 
 
-def test_selling_into_the_reserve_is_refused_before_the_quote():
-    jupiter = FakeJupiter(order())
+def test_a_sale_shrinks_so_the_sol_reserve_stays_untouched():
+    # La wallet tiene 0.26 SOL: vender 0.25 dejaría 0.01, menos que la reserva de 0.03 → se venden 0.23
+    jupiter = FakeJupiter(order(inAmount="230000000", outAmount="20680000"))
     executor, _ = live(jupiter, rpc=FakeRpc(sol=0.26))
+    fill = executor.execute(SELL, Sleeve(sol=0.25, usdc=0))
+    assert jupiter.orders[0][2] == 230_000_000
+    assert fill.sol_qty == pytest.approx(0.25)  # el fill viene de lo que reporta /execute (FakeJupiter)
+
+
+def test_nothing_free_to_sell_above_the_reserve_is_refused_before_the_quote():
+    jupiter = FakeJupiter(order())
+    executor, _ = live(jupiter, rpc=FakeRpc(sol=0.035))
     with pytest.raises(Refused, match="reserva"):
-        executor.execute(SELL, Sleeve(sol=0.25, usdc=0))
+        executor.execute(SELL, Sleeve(sol=0.03, usdc=0))
     assert jupiter.orders == []
 
 
@@ -192,7 +201,7 @@ def test_funding_takes_at_most_the_budget_and_never_the_reserve():
     rich = LiveExecutor(jupiter=FakeJupiter(order()), rpc=FakeRpc(sol=0.4189, usdc=0), address=ME,
                         limits=LiveLimits(budget_usd=1000, min_sol_reserve=0.03), load_key=lambda: KEY,
                         journal=Journal(), kill=lambda: False, trades_today=lambda: 0)
-    assert rich.fund(price=90.0).sol == pytest.approx(0.3889)
+    assert rich.fund(price=90.0).sol == pytest.approx(0.4189 - 0.03 - 0.005)  # reserva + colchón para comisiones
 
 
 def test_funding_an_empty_wallet_is_refused():
@@ -222,3 +231,24 @@ def test_a_quote_that_expired_before_landing_is_retried_with_a_new_one():
     executor, _ = live(FakeJupiter(order(), result=expired), rpc=FakeRpc(status=None))
     with pytest.raises(RetryLater):
         executor.execute(SELL, Sleeve(sol=0.25, usdc=0))
+
+
+def test_an_order_that_cannot_be_recorded_is_never_sent():
+    jupiter = FakeJupiter(order())
+    executor, _ = live(jupiter)
+
+    def broken_save(pending):
+        raise OSError("disco lleno")
+
+    with pytest.raises(OSError):
+        executor.execute(SELL, Sleeve(sol=0.25, usdc=0), on_send=broken_save)
+    assert jupiter.executed == []
+
+
+def test_anything_that_breaks_after_sending_is_unknown_with_the_full_order():
+    garbage = {"status": "Success", "code": 0, "signature": "SIG", "totalInputAmount": "no-es-un-número"}
+    executor, _ = live(FakeJupiter(order(), result=garbage))
+    with pytest.raises(Unknown) as err:
+        executor.execute(SELL, Sleeve(sol=0.25, usdc=0))
+    assert err.value.pending["quote_out"] == 22480000
+    assert err.value.pending["request_id"] == "req-1"
