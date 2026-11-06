@@ -1,0 +1,34 @@
+# Configuración de Solbot. Copia este archivo a solbot.toml y ajústalo.
+# Sin solbot.toml el bot corre en papel con estos mismos valores.
+
+[strategy]
+# Estrategia del bot. Compara todas en la pestaña Backtest de la interfaz.
+#   trend_sma  { n = 50 }                    tendencia: SOL si el precio cierra sobre su media de n días
+#   sma_cross  { fast = 10, slow = 30 }      cruce de medias
+#   vol_target { target = 0.4, lookback = 30 } menos SOL cuando sube la volatilidad
+#   fixed_mix  { sol = 0.5 }                 mezcla fija SOL/USDC
+#   buy_hold   {}                            comprar y mantener
+family = "trend_sma"
+params = { n = 50 }
+
+[bot]
+mode = "paper"            # "paper" (simulado) o "live" (dinero real)
+paper_start_usd = 1000    # capital ficticio del modo papel
+paper_cost_bps = 10       # costo supuesto en papel sobre la cotización real (10 = 0.10%)
+min_trade_usd = 1         # no opera diferencias más chicas que esto
+
+[live]
+# Límites duros del dinero real. La interfaz los muestra pero NO puede cambiarlos.
+wallet_dir = "~/.solana-paper-bot"                   # wallet.address + wallet.json (formato solana-keygen)
+rpc_env_file = "~/.config/PolloTraderBot/config.env" # de aquí salen SOLANA_RPC_URL y los datos de Telegram
+budget_usd = 25            # cuánto toma el bot de la wallet al empezar (primero USDC, luego SOL)
+max_trade_usd = 50         # tope por operación; si hace falta más, rebalancea en varios días
+min_sol_reserve = 0.03     # SOL que nunca se toca: paga las comisiones de red
+max_slippage_bps = 100     # 1%
+max_price_impact_bps = 100 # 1%
+max_deviation_bps = 150    # precio de Jupiter vs. Binance: más de 1.5% de diferencia cancela la orden
+max_trades_per_day = 2
+
+[server]
+host = "127.0.0.1"
+port = 8787

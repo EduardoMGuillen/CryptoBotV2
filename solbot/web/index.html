@@ -1,0 +1,380 @@
+<!doctype html>
+<html lang="es" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="solbot-token" content="{{TOKEN}}">
+<meta name="color-scheme" content="dark light">
+<title>Solbot</title>
+<link rel="icon" href="/static/icon.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap">
+<link rel="stylesheet" href="/static/app.css">
+<script src="/static/vendor/lightweight-charts.standalone.production.js" defer></script>
+<script src="/static/app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" class="sprite" aria-hidden="true">
+  <symbol id="i-logo" viewBox="0 0 32 32"><rect x="1" y="1" width="30" height="30" rx="9" style="fill:currentColor"/><path d="M8 20.5 13 15l4 3.5 7-8" style="fill:none;stroke:var(--logo-ink);stroke-width:2.6;stroke-linecap:round;stroke-linejoin:round"/><circle cx="24" cy="10.5" r="2.2" style="fill:var(--logo-ink)"/></symbol>
+  <symbol id="i-panel" viewBox="0 0 24 24"><rect x="3.5" y="3.5" width="7" height="7" rx="2"/><rect x="13.5" y="3.5" width="7" height="7" rx="2"/><rect x="3.5" y="13.5" width="7" height="7" rx="2"/><rect x="13.5" y="13.5" width="7" height="7" rx="2"/></symbol>
+  <symbol id="i-market" viewBox="0 0 24 24"><path d="M7 3v3M7 15v6M17 3v6M17 17v4"/><rect x="4.5" y="6" width="5" height="9" rx="1.5"/><rect x="14.5" y="9" width="5" height="8" rx="1.5"/></symbol>
+  <symbol id="i-backtest" viewBox="0 0 24 24"><path d="M3.5 20.5h17"/><path d="M5 16.5l4.5-5 3.5 3 6-7.5"/><path d="M15 7h4v4"/></symbol>
+  <symbol id="i-trades" viewBox="0 0 24 24"><path d="M7 4 3.5 7.5 7 11M3.5 7.5h13M17 13l3.5 3.5L17 20M20.5 16.5h-13"/></symbol>
+  <symbol id="i-wallet" viewBox="0 0 24 24"><rect x="3" y="5.5" width="18" height="14" rx="3"/><path d="M16 12.5h2.5M3 9.5h18"/></symbol>
+  <symbol id="i-play" viewBox="0 0 24 24"><path d="M8 5.5v13l10.5-6.5z"/></symbol>
+  <symbol id="i-pause" viewBox="0 0 24 24"><path d="M8.5 5.5v13M15.5 5.5v13"/></symbol>
+  <symbol id="i-bolt" viewBox="0 0 24 24"><path d="M13 3 5.5 13.5H12L11 21l7.5-10.5H12z"/></symbol>
+  <symbol id="i-moon" viewBox="0 0 24 24"><path d="M19.5 14.5A7.5 7.5 0 0 1 9.5 4.5a7.5 7.5 0 1 0 10 10z"/></symbol>
+  <symbol id="i-external" viewBox="0 0 24 24"><path d="M14 4.5h5.5V10M19.5 4.5 11 13M17 14v4.5a1.5 1.5 0 0 1-1.5 1.5h-10A1.5 1.5 0 0 1 4 18.5v-10A1.5 1.5 0 0 1 5.5 7H10"/></symbol>
+  <symbol id="i-copy" viewBox="0 0 24 24"><rect x="8.5" y="8.5" width="11" height="11" rx="2.5"/><path d="M15.5 8.5V6a1.5 1.5 0 0 0-1.5-1.5H6A1.5 1.5 0 0 0 4.5 6v8A1.5 1.5 0 0 0 6 15.5h2.5"/></symbol>
+  <symbol id="i-alert" viewBox="0 0 24 24"><path d="M12 4 2.8 19.5h18.4z"/><path d="M12 10v4.5M12 17.2v.3"/></symbol>
+  <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 3.5 5 6v5.5c0 4.2 2.9 7.6 7 9 4.1-1.4 7-4.8 7-9V6z"/><path d="m9 12 2.2 2.2L15.5 10"/></symbol>
+  <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M12 11v5.5M12 7.8v.4"/></symbol>
+  <symbol id="i-menu" viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/></symbol>
+  <symbol id="i-chev-left" viewBox="0 0 24 24"><path d="m14.5 6-6 6 6 6"/></symbol>
+</svg>
+
+<div class="shell" id="shell">
+  <header class="ticker" aria-label="Precios de mercado">
+    <div class="ticker__status" id="botPill" role="status"><span class="dot"></span><span class="ticker__status-text">Conectando…</span></div>
+    <div class="ticker__track" id="tickerTrack" aria-live="off"></div>
+  </header>
+
+  <aside class="sidebar" id="sidebar" aria-label="Navegación">
+    <div class="sidebar__top">
+      <a class="brand" href="#panel" aria-label="Solbot, ir al panel">
+        <svg class="brand__logo" aria-hidden="true"><use href="#i-logo"/></svg>
+        <span class="brand__name">Solbot</span>
+      </a>
+      <button class="icon-btn sidebar__collapse" id="collapseNav" type="button" aria-label="Contraer menú"><svg aria-hidden="true"><use href="#i-chev-left"/></svg></button>
+    </div>
+    <nav class="nav">
+      <a href="#panel" data-page="panel"><svg aria-hidden="true"><use href="#i-panel"/></svg><span>Panel</span></a>
+      <a href="#mercado" data-page="mercado"><svg aria-hidden="true"><use href="#i-market"/></svg><span>Mercado</span></a>
+      <a href="#backtest" data-page="backtest"><svg aria-hidden="true"><use href="#i-backtest"/></svg><span>Backtest</span></a>
+      <a href="#operaciones" data-page="operaciones"><svg aria-hidden="true"><use href="#i-trades"/></svg><span>Operaciones</span></a>
+      <a href="#wallet" data-page="wallet"><svg aria-hidden="true"><use href="#i-wallet"/></svg><span>Wallet y límites</span></a>
+    </nav>
+    <div class="sidebar__bottom">
+      <div class="mode-card" id="modeCard">
+        <p class="mode-card__title" id="modeTitle">Modo papel</p>
+        <p class="mode-card__text" id="modeText">Precios reales de Jupiter, dinero ficticio. Tu wallet no se toca.</p>
+      </div>
+      <label class="theme-switch">
+        <svg aria-hidden="true"><use href="#i-moon"/></svg>
+        <span>Tema oscuro</span>
+        <input type="checkbox" id="themeToggle" role="switch" checked>
+        <span class="theme-switch__track" aria-hidden="true"></span>
+      </label>
+    </div>
+  </aside>
+
+  <div class="main">
+    <div class="topbar">
+      <button class="icon-btn topbar__menu" id="openNav" type="button" aria-label="Abrir menú"><svg aria-hidden="true"><use href="#i-menu"/></svg></button>
+      <div class="topbar__balance">
+        <span class="topbar__label">Valor del bot</span>
+        <span class="topbar__value" id="topValue">—</span>
+      </div>
+      <div class="topbar__actions">
+        <button class="btn btn--ghost" id="runNow" type="button"><svg aria-hidden="true"><use href="#i-bolt"/></svg><span>Ejecutar ahora</span></button>
+        <button class="btn btn--primary" id="toggleRun" type="button"><svg aria-hidden="true"><use href="#i-pause"/></svg><span>Pausar</span></button>
+      </div>
+    </div>
+
+    <div class="banners" id="banners"></div>
+
+    <main class="views" id="views">
+      <!-- PANEL -->
+      <section class="view" data-view="panel" aria-labelledby="h-panel">
+        <header class="page-head">
+          <div>
+            <h1 id="h-panel">Panel</h1>
+            <p class="page-head__sub">Tu bot decide una vez al día, cuando cierra la vela diaria de SOL (6:00 p. m. en Honduras).</p>
+          </div>
+          <div class="page-head__actions">
+            <a class="btn btn--ghost" href="#backtest">Ver backtest</a>
+          </div>
+        </header>
+
+        <div class="grid grid--panel">
+          <article class="card card--value">
+            <h2 class="card__title">Valor del bot</h2>
+            <p class="hero" id="heroValue">—</p>
+            <p class="delta-line" id="heroDelta"></p>
+
+            <h3 class="card__subtitle">Distribución</h3>
+            <div class="segbar" id="segbar" role="img" aria-label="Distribución entre SOL y USDC"></div>
+            <ul class="dist" id="distList"></ul>
+            <p class="vs-hold" id="vsHold"></p>
+          </article>
+
+          <article class="card card--chart">
+            <div class="card__head">
+              <div>
+                <h2 class="card__title">Bot vs. mantener SOL</h2>
+                <p class="card__caption" id="equityCaption"></p>
+              </div>
+              <div class="segmented" role="group" aria-label="Qué mostrar">
+                <button type="button" data-eq="bot" aria-pressed="false">Tu bot</button>
+                <button type="button" data-eq="backtest" aria-pressed="true">Backtest</button>
+              </div>
+            </div>
+            <div class="legend" id="equityLegend"></div>
+            <div class="chart-wrap">
+              <div class="chart chart--equity" id="equityChart"></div>
+              <div class="tooltip" id="equityTip" hidden></div>
+              <p class="chart-empty" id="equityEmpty" hidden></p>
+            </div>
+          </article>
+
+          <article class="card card--trades">
+            <div class="card__head">
+              <h2 class="card__title">Operaciones recientes</h2>
+              <a class="link" href="#operaciones">Ver todas</a>
+            </div>
+            <ul class="trade-list" id="recentTrades"></ul>
+          </article>
+
+          <article class="card card--signal" id="signalCard">
+            <div class="pixels" aria-hidden="true"></div>
+            <div class="signal">
+              <p class="signal__when"><span>Próxima decisión</span> <strong id="countdown">—</strong></p>
+              <p class="signal__state" id="signalState">—</p>
+              <p class="signal__why" id="signalWhy"></p>
+              <div class="gauge" id="gauge" hidden>
+                <div class="gauge__track"><span class="gauge__mid"></span><span class="gauge__dot" id="gaugeDot"></span></div>
+                <div class="gauge__labels"><span id="gaugeLeft">Debajo de la media</span><span id="gaugeRight">Encima</span></div>
+              </div>
+              <p class="signal__notice" id="signalNotice"></p>
+            </div>
+          </article>
+        </div>
+      </section>
+
+      <!-- MERCADO -->
+      <section class="view" data-view="mercado" aria-labelledby="h-mercado" hidden>
+        <header class="page-head">
+          <div>
+            <h1 id="h-mercado">Mercado</h1>
+            <p class="page-head__sub" id="marketSub">SOL/USDT en velas diarias, con las señales de tu estrategia.</p>
+          </div>
+        </header>
+        <div class="filters" role="group" aria-label="Rango">
+          <span class="filters__label">Rango</span>
+          <div class="segmented" id="rangeButtons">
+            <button type="button" data-days="90" aria-pressed="false">3 meses</button>
+            <button type="button" data-days="180" aria-pressed="false">6 meses</button>
+            <button type="button" data-days="365" aria-pressed="true">1 año</button>
+            <button type="button" data-days="730" aria-pressed="false">2 años</button>
+            <button type="button" data-days="5000" aria-pressed="false">Todo</button>
+          </div>
+        </div>
+        <div class="stats" id="marketStats"></div>
+        <article class="card">
+          <div class="legend" id="marketLegend"></div>
+          <div class="chart-wrap">
+            <div class="chart chart--market" id="marketChart"></div>
+            <div class="tooltip" id="marketTip" hidden></div>
+          </div>
+          <p class="card__foot">Las flechas son las operaciones que la estrategia habría hecho; los círculos, las que hizo tu bot.</p>
+        </article>
+      </section>
+
+      <!-- BACKTEST -->
+      <section class="view" data-view="backtest" aria-labelledby="h-backtest" hidden>
+        <header class="page-head">
+          <div>
+            <h1 id="h-backtest">Backtest</h1>
+            <p class="page-head__sub" id="btSub">¿Alguna estrategia le gana a solo mantener SOL? Datos reales, costos incluidos.</p>
+          </div>
+          <div class="page-head__actions">
+            <button class="btn btn--ghost" id="btRefresh" type="button">Recalcular</button>
+          </div>
+        </header>
+
+        <div class="verdict" id="verdict" hidden></div>
+
+        <div class="filters" role="group" aria-label="Filtros del backtest">
+          <span class="filters__label">Escenario</span>
+          <div class="segmented" id="btScenario">
+            <button type="button" data-scenario="lump" aria-pressed="true">Capital inicial</button>
+            <button type="button" data-scenario="dca" aria-pressed="false">Aporte semanal</button>
+          </div>
+          <span class="filters__label">Periodo</span>
+          <div class="segmented" id="btPeriod">
+            <button type="button" data-period="full" aria-pressed="true">Completo</button>
+            <button type="button" data-period="train" aria-pressed="false">Entrenamiento</button>
+            <button type="button" data-period="test" aria-pressed="false">Prueba</button>
+          </div>
+        </div>
+
+        <div class="grid grid--bt">
+          <article class="card card--btchart">
+            <div class="card__head">
+              <div>
+                <h2 class="card__title" id="btChartTitle">Valor del portafolio</h2>
+                <p class="card__caption" id="btChartCaption"></p>
+              </div>
+              <label class="check"><input type="checkbox" id="btLog" checked> Escala logarítmica</label>
+            </div>
+            <div class="legend" id="btLegend"></div>
+            <div class="chart-wrap">
+              <div class="chart chart--bt" id="btChart"></div>
+              <div class="tooltip" id="btTip" hidden></div>
+            </div>
+            <h3 class="card__subtitle">Caída desde el máximo</h3>
+            <div class="chart-wrap">
+              <div class="chart chart--dd" id="ddChart"></div>
+              <div class="tooltip" id="ddTip" hidden></div>
+            </div>
+          </article>
+
+          <article class="card card--table">
+            <div class="card__head">
+              <h2 class="card__title">Estrategias</h2>
+              <p class="card__caption">Toca una fila para verla en la gráfica.</p>
+            </div>
+            <div class="table-scroll">
+              <table class="table" id="btTable">
+                <thead>
+                  <tr>
+                    <th scope="col">Estrategia</th>
+                    <th scope="col" class="num">Valor final</th>
+                    <th scope="col" class="num">Anual</th>
+                    <th scope="col" class="num">Caída máx.</th>
+                    <th scope="col" class="num">Sharpe</th>
+                    <th scope="col" class="num">Operaciones</th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </article>
+
+          <article class="card card--years">
+            <div class="card__head">
+              <h2 class="card__title">Rendimiento por año</h2>
+              <p class="card__caption" id="yearsCaption">Capital inicial, sin aportes.</p>
+            </div>
+            <div class="table-scroll"><table class="table table--heat" id="yearsTable"></table></div>
+          </article>
+
+          <article class="card card--costs">
+            <div class="card__head">
+              <h2 class="card__title">¿Y si operar costara más?</h2>
+              <p class="card__caption">Rendimiento anual según el costo por operación. Jupiter cotiza hoy alrededor de 0.02%.</p>
+            </div>
+            <div class="table-scroll"><table class="table" id="costsTable"></table></div>
+          </article>
+
+          <article class="card card--notes">
+            <h2 class="card__title">Cómo leer esto</h2>
+            <ul class="notes">
+              <li><strong>Entrenamiento</strong> es el periodo con el que se eligen los parámetros. <strong>Prueba</strong> son datos que esa elección nunca vio: es la medida honesta.</li>
+              <li><strong>Caída máx.</strong> es lo peor que te habría tocado aguantar desde un máximo. Una caída de −90% necesita subir 900% para recuperarse.</li>
+              <li><strong>Sharpe</strong> mide ganancia por unidad de riesgo. Por encima de 1 es bueno; cerca de 0, la ganancia no compensa el riesgo.</li>
+              <li>El pasado no garantiza el futuro. Una estrategia que ganó en 2021–2023 puede perder después; por eso existe el periodo de prueba.</li>
+            </ul>
+          </article>
+        </div>
+      </section>
+
+      <!-- OPERACIONES -->
+      <section class="view" data-view="operaciones" aria-labelledby="h-ops" hidden>
+        <header class="page-head">
+          <div>
+            <h1 id="h-ops">Operaciones</h1>
+            <p class="page-head__sub" id="opsSub">Todo lo que ha hecho tu bot, de la más reciente a la más antigua.</p>
+          </div>
+        </header>
+        <article class="card">
+          <div class="table-scroll">
+            <table class="table" id="opsTable">
+              <thead>
+                <tr>
+                  <th scope="col">Fecha</th>
+                  <th scope="col">Operación</th>
+                  <th scope="col" class="num">SOL</th>
+                  <th scope="col" class="num">USDC</th>
+                  <th scope="col" class="num">Precio</th>
+                  <th scope="col" class="num">Costo</th>
+                  <th scope="col">Ruta</th>
+                  <th scope="col">Transacción</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+          <p class="empty" id="opsEmpty" hidden></p>
+        </article>
+      </section>
+
+      <!-- WALLET -->
+      <section class="view" data-view="wallet" aria-labelledby="h-wallet" hidden>
+        <header class="page-head">
+          <div>
+            <h1 id="h-wallet">Wallet y límites</h1>
+            <p class="page-head__sub">Tu wallet dedicada de <code>~/.solana-paper-bot</code>. La llave privada nunca sale de tu computadora ni aparece en esta página.</p>
+          </div>
+        </header>
+        <div class="grid grid--wallet">
+          <article class="card card--wallet">
+            <h2 class="card__title">Wallet</h2>
+            <div class="address">
+              <code id="walletAddress">—</code>
+              <button class="icon-btn" id="copyAddress" type="button" aria-label="Copiar dirección"><svg aria-hidden="true"><use href="#i-copy"/></svg></button>
+              <a class="icon-btn" id="walletExplorer" href="#" target="_blank" rel="noopener noreferrer" aria-label="Ver en Solscan"><svg aria-hidden="true"><use href="#i-external"/></svg></a>
+            </div>
+            <dl class="kv" id="walletKv"></dl>
+            <p class="card__foot" id="walletFoot"></p>
+          </article>
+
+          <article class="card card--limits">
+            <h2 class="card__title">Límites de dinero real</h2>
+            <p class="card__caption">Se cambian solo en <code>solbot.toml</code>. Esta página no puede subirlos.</p>
+            <dl class="kv" id="limitsKv"></dl>
+          </article>
+
+          <article class="card card--kill">
+            <h2 class="card__title">Parada de emergencia</h2>
+            <p class="kill-state" id="killState">—</p>
+            <p class="card__text">Si existe el archivo <code>KILL</code> en la carpeta de la wallet, el bot deja de operar al instante. Funciona aunque esta página no responda:</p>
+            <pre class="cmd"><code>touch ~/.solana-paper-bot/KILL</code></pre>
+            <p class="card__text">Para quitarla: <code>rm ~/.solana-paper-bot/KILL</code></p>
+          </article>
+
+          <article class="card card--howto">
+            <h2 class="card__title">Pasar a dinero real</h2>
+            <ol class="steps">
+              <li>Corre <code>solbot ensayo</code>: recorre una orden real con tu wallet (cotiza, valida, simula y firma) sin enviarla.</li>
+              <li>En <code>solbot.toml</code> pon <code>mode = "live"</code> y revisa los límites. Empieza con poco.</li>
+              <li>Reinicia <code>solbot serve</code> y pulsa Iniciar. Te pedirá los últimos 4 caracteres de la wallet.</li>
+            </ol>
+          </article>
+        </div>
+      </section>
+    </main>
+  </div>
+</div>
+
+<dialog class="dialog" id="confirmDialog" aria-labelledby="dialogTitle">
+  <form method="dialog" class="dialog__body" id="dialogForm">
+    <h2 id="dialogTitle">¿Seguro?</h2>
+    <p id="dialogText"></p>
+    <label class="field" id="dialogField" hidden>
+      <span id="dialogFieldLabel">Últimos 4 caracteres de tu wallet</span>
+      <input type="text" id="dialogInput" autocomplete="off" spellcheck="false" maxlength="8">
+    </label>
+    <p class="dialog__error" id="dialogError" role="alert"></p>
+    <div class="dialog__actions">
+      <button class="btn btn--ghost" value="cancel" type="submit" formnovalidate>Cancelar</button>
+      <button class="btn btn--primary" value="ok" type="submit" id="dialogOk">Confirmar</button>
+    </div>
+  </form>
+</dialog>
+
+<div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+</body>
+</html>

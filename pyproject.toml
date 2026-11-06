@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "solbot"
+version = "0.1.0"
+description = "Backtest de estrategias en SOL y bot SOL/USDC con Jupiter (papel y real)"
+requires-python = ">=3.12"
+dependencies = ["pandas>=2.2", "requests>=2.31", "solders>=0.21"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[project.scripts]
+solbot = "solbot.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["solbot*"]
+
+[tool.setuptools.package-data]
+solbot = ["web/*", "web/vendor/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

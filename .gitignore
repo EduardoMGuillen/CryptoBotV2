@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.egg-info/
+.pytest_cache/
+# Velas en caché, estado del bot y diario de órdenes: se generan solos.
+data/
+# Tu configuración local (puede tener límites de dinero real).
+solbot.toml
+
+# Capturas de las pruebas de la interfaz
+.playwright-mcp/
