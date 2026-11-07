@@ -82,3 +82,26 @@ def test_rebalance_buys_and_sells(tmp_path):
 
 def test_hold_spy():
     assert hold_spy({}) == {"SPY": 1.0}
+
+
+def test_prices_retries_once_after_rate_limit(tmp_path, monkeypatch):
+    from solbot import stocksim
+
+    class Resp:
+        def __init__(self, code, data):
+            self.status_code, self._data = code, data
+
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                import requests
+                raise requests.HTTPError(f"{self.status_code}")
+
+        def json(self):
+            return self._data
+
+    mint = XSTOCKS["SPY"]
+    answers = [Resp(429, {}), Resp(200, {mint: {"usdPrice": 700.0}})]
+    sim = stocksim.StockSim(tmp_path)
+    monkeypatch.setattr(sim.http, "get", lambda *a, **k: answers.pop(0))
+    monkeypatch.setattr(stocksim.time, "sleep", lambda s: None)
+    assert sim.prices() == {"SPY": 700.0}

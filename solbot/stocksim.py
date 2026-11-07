@@ -246,7 +246,11 @@ class StockSim:
 
     def prices(self) -> dict[str, float]:
         """Precio de cada xStock en Jupiter (lo que valen los tokens, no la acción en bolsa)."""
-        r = self.http.get(JUP_PRICE, params={"ids": ",".join(XSTOCKS.values())}, timeout=15)
+        for attempt in range(2):  # el API de precios es compartido con memesim: a veces responde 429
+            r = self.http.get(JUP_PRICE, params={"ids": ",".join(XSTOCKS.values())}, timeout=15)
+            if r.status_code != 429:
+                break
+            time.sleep(5)
         r.raise_for_status()
         data = r.json()
         by_mint = {m: s for s, m in XSTOCKS.items()}
