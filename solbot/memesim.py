@@ -80,6 +80,7 @@ class Rules:
     max_open: int = 10
     skip_copycats: bool = False  # no comprar si otra moneda más antigua ya usa el mismo nombre
     min_age_min: float = 0.0  # esperar a que la moneda tenga esta edad (minutos) antes de comprar
+    min_buy_ratio: float = 0.0  # momentum: compras/ventas de los últimos 5 min (0 = sin filtro)
 
 
 # ---- reglas puras ---------------------------------------------------------------------------
@@ -321,6 +322,11 @@ class Desk:
         age_min = (now - pair["pairCreatedAt"] / 1000) / 60
         if age_min < self.rules.min_age_min:
             return "wait"
+        if self.rules.min_buy_ratio:
+            m5 = (pair.get("txns") or {}).get("m5") or {}
+            if (m5.get("buys") or 0) < self.rules.min_buy_ratio * max(1, m5.get("sells") or 0):
+                self.count("rechazo_momentum")
+                return None
         if not self.book.can_open(self.rules):
             self.count("sin_cupo")
             return None
@@ -394,13 +400,26 @@ class Desk:
                  self.name, p.symbol, frac * 100, reason, price / p.entry, real_mult, fill.usd)
 
 
-# Variantes que corren en paralelo. "post" son las reglas del post, sin tocar; está en la
-# carpeta raíz para no perder su historial. Cada cambio se registra en data/meme/journal.md.
+# Variantes que corren en paralelo sobre las mismas monedas. La primera vive en la carpeta raíz.
+# Cada cambio se registra en data/meme/journal.md. "post" (las reglas del post de X) quedó
+# archivada el 2026-11-07 a las 09:55 tras −77 % en 68 operaciones (data/meme/archive/).
+ROOT_VARIANT = "principal"
+_QUICK = dict(skip_copycats=True)
 VARIANTS = {
-    "post": Rules(),
+    # Mi estrategia: el 53 % de las monedas tocó 1.5x pero la mayoría terminó en rug (mediana del pico
+    # de los rugs: x1.76). Se asegura la mitad en 1.5x, el resto con trailing; sale antes ante rugs.
+    "principal": Rules(skip_copycats=True, min_age_min=5.0, targets=((1.5, 0.5),), trail=0.25, stop=-0.20,
+                       rug_liq_drop=0.8, max_hold_h=6.0, size_frac=0.06, max_open=8),
     "sin_copias": Rules(skip_copycats=True),
-    # 2026-11-07 08:57: en "post" (31 cerradas) 17 de 22 compras con <10 min de vida fueron rug.
     "sin_copias_30m": Rules(skip_copycats=True, min_age_min=30.0),
+    # Extremos:
+    "todo_1_2x": Rules(**_QUICK, targets=((1.2, 1.0),), stop=-0.15, rug_liq_drop=0.8, max_hold_h=2.0),
+    "todo_1_5x": Rules(**_QUICK, targets=((1.5, 1.0),), stop=-0.20, rug_liq_drop=0.8, max_hold_h=3.0),
+    "mitad_1_3x": Rules(**_QUICK, targets=((1.3, 0.5),), trail=0.20, stop=-0.20, rug_liq_drop=0.8),
+    "alerta_rug": Rules(**_QUICK, targets=((1.5, 0.5),), trail=0.25, rug_liq_drop=0.9),
+    "momentum": Rules(**_QUICK, min_buy_ratio=1.5, targets=((1.5, 0.5),), trail=0.25, stop=-0.20, rug_liq_drop=0.8),
+    "pocas_grandes": Rules(**_QUICK, size_frac=0.15, max_open=4, targets=((1.5, 1.0),), stop=-0.20, rug_liq_drop=0.8),
+    "loteria_3x": Rules(**_QUICK, targets=((3.0, 0.5),), trail=0.40, stop=-0.50, max_hold_h=12.0),
 }
 
 
@@ -416,11 +435,12 @@ class Sim:
         self.symbols: dict[str, tuple[str, float]] = {}  # símbolo -> (mint más antiguo, creado ms)
         self._sol = (0.0, 0.0)  # (precio, cuándo)
         self.jupiter = Jupiter(session=self.http)
-        variants = variants or {"post": rules}
+        self._quotes: dict[tuple[str, str], tuple[float, int, object]] = {}
+        variants = variants or {ROOT_VARIANT: rules}
         self.desks: list[Desk] = []
         for name, vrules in variants.items():
             vfolder = folder if not self.desks else folder / "variants" / name
-            self.desks.append(Desk(name, vfolder, vrules, TxSim(self.jupiter.order, self.sol_price, vrules), start_cash))
+            self.desks.append(Desk(name, vfolder, vrules, TxSim(self.quote, self.sol_price, vrules), start_cash))
         self.checked: dict[str, float] = self.desks[0].extra.get("checked", {})
         self.waiting: dict[str, set[str]] = {}  # token -> mesas que esperan a que tenga más edad
 
@@ -462,6 +482,30 @@ class Sim:
             r.raise_for_status()
             return r.json()
         r.raise_for_status()
+
+    def quote(self, input_mint: str, output_mint: str, amount: int, max_age: float = 3.0) -> dict:
+        """Cotización de Jupiter compartida entre mesas: si otra mesa cotizó el mismo par hace menos de
+        `max_age` s, se reutiliza escalada al monto (con $2–15 en pools de >$20k el impacto es casi
+        lineal). Evita pasar el límite de Jupiter con muchas variantes."""
+        key = (input_mint, output_mint)
+        cached = self._quotes.get(key)
+        if cached and time.time() - cached[0] < max_age:
+            _, base, result = cached
+        else:
+            try:
+                result = self.jupiter.order(input_mint, output_mint, amount)
+            except JupiterError as exc:
+                result = exc
+            base = amount
+            self._quotes[key] = (time.time(), base, result)
+        if isinstance(result, Exception):
+            raise result
+        k = amount / base if base else 0.0
+        out = dict(result)
+        out["outAmount"] = str(int(int(result.get("outAmount") or 0) * k))
+        if result.get("outUsdValue") is not None:
+            out["outUsdValue"] = float(result["outUsdValue"]) * k
+        return out
 
     def sol_price(self) -> float:
         price, at = self._sol
@@ -762,8 +806,8 @@ def snapshot(folder: Path, start_cash: float = 100.0) -> dict:
 
 
 def variant_folder(root: Path, name: str | None) -> Path:
-    """Carpeta de una variante ("post" o vacío: la raíz). Valida el nombre: viene de la URL."""
-    if not name or name == "post":
+    """Carpeta de una variante (la principal o vacío: la raíz). Valida el nombre: viene de la URL."""
+    if not name or name == ROOT_VARIANT:
         return root
     if not VARIANT_RE.match(name):
         raise ValueError("Variante inválida.")
@@ -772,7 +816,7 @@ def variant_folder(root: Path, name: str | None) -> Path:
 
 def variants_summary(root: Path) -> list[dict]:
     """Resumen de cada variante, desde su propio inicio (cada una arrancó en su momento)."""
-    names = ["post"] + sorted(p.name for p in (root / "variants").glob("*") if p.is_dir() and VARIANT_RE.match(p.name))
+    names = [ROOT_VARIANT] + sorted(p.name for p in (root / "variants").glob("*") if p.is_dir() and VARIANT_RE.match(p.name))
     out = []
     for name in names:
         path = variant_folder(root, name) / "state.json"
@@ -783,7 +827,7 @@ def variants_summary(root: Path) -> list[dict]:
         out.append({"name": name, "equity": st["equity"], "start": st["start"], "closed": len(closed),
                     "wins": sum(1 for c in closed if c["pnl"] > 0), "open": len(st["positions"]),
                     "realized": sum(c["pnl"] for c in closed),
-                    "skip_copycats": bool((st.get("rules") or {}).get("skip_copycats"))})
+                    "rules": st.get("rules") or {}})
     return out
 
 

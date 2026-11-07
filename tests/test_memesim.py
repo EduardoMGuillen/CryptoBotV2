@@ -305,7 +305,8 @@ def test_variant_folder_validates_names(tmp_path):
     from solbot.memesim import variant_folder
 
     assert variant_folder(tmp_path, "") == tmp_path
-    assert variant_folder(tmp_path, "post") == tmp_path
+    assert variant_folder(tmp_path, "principal") == tmp_path
+    assert variant_folder(tmp_path, "post") == tmp_path / "variants" / "post"
     assert variant_folder(tmp_path, "sin_copias") == tmp_path / "variants" / "sin_copias"
     for bad in ("../x", "A", "a/b", "x" * 40):
         with pytest.raises(ValueError):
@@ -409,3 +410,55 @@ def test_backup_rotates(tmp_path):
     assert sorted(p.name for p in dest.glob("*.tar.gz")) == ["meme-20261107-0200.tar.gz", "meme-20261107-0300.tar.gz"]
     names = tarfile.open(path).getnames()
     assert "meme/state.json" in names and "meme/state.tmp" not in names
+
+
+def test_shared_quote_is_scaled_and_expires(tmp_path):
+    from solbot.memesim import Sim
+
+    sim = Sim(tmp_path, RULES, rpc_url="http://unused")
+    calls = []
+
+    def order(i, o, amount):
+        calls.append(amount)
+        return {"outAmount": "1000", "outUsdValue": 4.0}
+
+    sim.jupiter.order = order
+    a = sim.quote("SOL", "MINT", 100)
+    b = sim.quote("SOL", "MINT", 50)  # otra mesa, mismo instante: se reutiliza a la mitad
+    assert calls == [100]
+    assert a["outAmount"] == "1000" and b["outAmount"] == "500" and b["outUsdValue"] == pytest.approx(2.0)
+    c = sim.quote("SOL", "MINT", 100, max_age=0.0)  # vencida: cotiza de nuevo
+    assert calls == [100, 100] and c["outAmount"] == "1000"
+
+
+def test_shared_quote_reraises_no_route(tmp_path):
+    from solbot.memesim import Sim
+
+    sim = Sim(tmp_path, RULES, rpc_url="http://unused")
+    sim.jupiter.order = lambda i, o, a: (_ for _ in ()).throw(JupiterError("Jupiter rechazó la cotización (HTTP 400)"))
+    for _ in range(2):
+        with pytest.raises(JupiterError):
+            sim.quote("MINT", "SOL", 10)
+
+
+def test_momentum_filter(tmp_path):
+    from solbot.memesim import Desk
+
+    rules = Rules(min_buy_ratio=1.5)
+    desk = Desk("m", tmp_path, rules, TxSim(lambda *a: {"outAmount": "1", "outUsdValue": 1.0}, lambda: 100.0, rules,
+                                             rng=lambda: 0.99, sleep=lambda s: None))
+    weak = pair(txns={"m5": {"buys": 10, "sells": 9}})
+    assert desk.try_buy(weak, NOW, lambda t: 6, is_copy=False) is None
+    assert desk.funnel["rechazo_momentum"] == 1 and desk.book.positions == {}
+    strong = pair(txns={"m5": {"buys": 30, "sells": 10}})
+    desk.try_buy(strong, NOW, lambda t: 6, is_copy=False)
+    assert "MINT" in desk.book.positions
+
+
+def test_full_exit_at_single_target():
+    rules = Rules(targets=((1.5, 1.0),))
+    book = Book(cash=100.0)
+    p = book.open(pair(), NOW, 4.0, Fill(ok=True, raw=4_000_000_000), decimals=6)
+    assert step_position(p, 0.0016, 30_000, NOW + 60, rules) == [(1.0, "tp1")]
+    book.sell(p, p.qty, 6.0, 0.05, NOW + 60, "tp1")
+    assert book.positions == {} and book.closed[0]["reason"] == "tp1"

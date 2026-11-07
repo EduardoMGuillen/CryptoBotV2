@@ -44,14 +44,26 @@
   const isGoodExit = (r) => r === "trailing" || (r || "").startsWith("tp");
 
   let snap = null;
-  const VARIANT_NAMES = { post: "Reglas del post", sin_copias: "Sin copias", sin_copias_30m: "Sin copias, 30 min de vida" };
-  const VARIANT_HELP = {
-    post: "Las reglas tal cual las publican.",
-    sin_copias: "Igual, pero no compra monedas que copian el nombre de otra.",
-    sin_copias_30m: "Sin copias y solo compra monedas con al menos 30 minutos de vida.",
+  const VARIANT_NAMES = {
+    principal: "Principal", sin_copias: "Sin copias", sin_copias_30m: "Sin copias, 30 min",
+    todo_1_2x: "Vende todo a 1.2x", todo_1_5x: "Vende todo a 1.5x", mitad_1_3x: "Mitad a 1.3x",
+    alerta_rug: "Alerta de rug", momentum: "Momentum", pocas_grandes: "Pocas y grandes", loteria_3x: "Lotería 3x",
   };
-  let variant = (location.hash.match(/v=([a-z0-9_]+)/) || [])[1] || "post";
-  const vq = () => (variant === "post" ? "" : "v=" + encodeURIComponent(variant));
+  const VARIANT_HELP = {
+    principal: "Sin copias, espera 5 min, vende la mitad a 1.5x y el resto con trailing de 25 %. Stop −20 %, sale si la liquidez cae 20 %.",
+    sin_copias: "Reglas del post, pero no compra monedas que copian el nombre de otra.",
+    sin_copias_30m: "Sin copias y solo compra monedas con al menos 30 minutos de vida.",
+    todo_1_2x: "Vende todo al subir 20 %. Stop −15 %.",
+    todo_1_5x: "Vende todo a 1.5x. Stop −20 %.",
+    mitad_1_3x: "Vende la mitad a 1.3x y el resto con trailing de 20 %.",
+    alerta_rug: "Sale apenas la liquidez cae 10 %.",
+    momentum: "Solo compra si en 5 min hubo al menos 1.5 compras por cada venta.",
+    pocas_grandes: "Máximo 4 posiciones de 15 % cada una; vende todo a 1.5x.",
+    loteria_3x: "Espera 3x para vender la mitad; stop −50 %, trailing 40 %.",
+  };
+  const ROOT = "principal";
+  let variant = (location.hash.match(/v=([a-z0-9_]+)/) || [])[1] || ROOT;
+  const vq = () => (variant === ROOT ? "" : "v=" + encodeURIComponent(variant));
 
   // ======================================================================= colador
   // Orden en que una moneda enfrenta los filtros; cada puerta agrupa motivos del embudo.
@@ -680,7 +692,7 @@
       b.title = VARIANT_HELP[v.name] || "";
       const change = v.equity - 100;
       const meta = el("span", "variant__meta");
-      meta.append(el("b", tone(change), money(v.equity)), document.createTextNode(` · ${v.closed} cerradas desde ${at(v.start)}`));
+      meta.append(el("b", tone(change), money(v.equity)), document.createTextNode(`, ${v.closed} cerradas`));
       b.append(el("span", "variant__name", VARIANT_NAMES[v.name] || v.name), meta);
       b.addEventListener("click", () => switchVariant(v.name));
       nav.append(b);
@@ -690,7 +702,7 @@
   function switchVariant(name) {
     if (name === variant) return;
     variant = name;
-    history.replaceState(null, "", name === "post" ? location.pathname : "#v=" + name);
+    history.replaceState(null, "", name === ROOT ? location.pathname : "#v=" + name);
     // Cada variante es otro libro: se reinicia lo que la página recuerda del anterior.
     shownValue = null;
     seenEvents.clear();
