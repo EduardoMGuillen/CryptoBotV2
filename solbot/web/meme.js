@@ -12,8 +12,9 @@
   const MINUS = "−";
   const REDUCED = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
-  const money = (v) => (v < 0 ? MINUS : "") + "$" + f2.format(Math.abs(v));
-  const signed = (v) => (v >= 0 ? "+" : MINUS) + "$" + f2.format(Math.abs(v));
+  // Si falta un dato se muestra "—" (nunca "NaN").
+  const money = (v) => (Number.isFinite(v) ? (v < 0 ? MINUS : "") + "$" + f2.format(Math.abs(v)) : "—");
+  const signed = (v) => (Number.isFinite(v) ? (v >= 0 ? "+" : MINUS) + "$" + f2.format(Math.abs(v)) : "—");
   const pct = (v) => (v >= 0 ? "+" : MINUS) + f1.format(Math.abs(v * 100)) + " %";
   const mult = (m) => "x" + (m >= 10 ? f1.format(m) : f2.format(m));
   const tone = (v) => (v > 0 ? "up" : v < 0 ? "down" : "");

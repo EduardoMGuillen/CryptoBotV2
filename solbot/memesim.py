@@ -173,6 +173,7 @@ class Position:
     proceeds: float = 0.0
     last: float = 0.0
     decimals: int = -1  # -1: desconocido (se consulta al RPC)
+    spike: float = 0.0  # salto >10x sin confirmar (posible precio falso)
     no_route: int = 0
     fees: float = 0.0
 
@@ -204,6 +205,11 @@ class Book:
 
     def equity(self) -> float:
         return self.cash + sum(p.qty * (p.last or p.entry) for p in self.positions.values())
+
+    def capital(self) -> float:
+        """Efectivo + lo que costaron las posiciones abiertas. Se usa para el tamaño de cada compra:
+        el valor de mercado puede inflarse con precios falsos (pools manipulados)."""
+        return self.cash + sum(p.cost for p in self.positions.values())
 
     def can_open(self, rules: Rules) -> bool:
         return len(self.positions) < rules.max_open
@@ -316,7 +322,7 @@ class Desk:
         if not self.book.can_open(self.rules):
             self.count("sin_cupo")
             return None
-        usd = min(self.book.equity() * self.rules.size_frac, self.book.cash)
+        usd = min(self.book.capital() * self.rules.size_frac, self.book.cash)
         fill = self.tx.buy(token, usd)
         self.count("tx_intentos")
         if not fill.ok:
@@ -343,6 +349,13 @@ class Desk:
                 continue
             price = float(pair.get("priceUsd") or 0)
             liq = float((pair.get("liquidity") or {}).get("usd") or 0)
+            if p.last and price > p.last * 10 and not p.spike:
+                # Subida de más de 10x en una revisión: suele ser un pool falso. Se espera a que la
+                # siguiente revisión la confirme antes de valuar o vender con ese precio.
+                p.spike = price
+                self.count("precio_sospechoso")
+                continue
+            p.spike = 0.0
             p.last = price
             self.record_price(token, now, price, liq)
             for frac, reason in step_position(p, price, liq, now, self.rules):
@@ -500,8 +513,11 @@ class Sim:
         self.checked = {t: s for t, s in self.checked.items() if s > limit}
         self.waiting = {t: names for t, names in self.waiting.items() if t in self.watch}
 
-    def best_pairs(self, tokens: list[str]) -> dict[str, dict]:
-        """Par más líquido de cada token (DexScreener, 30 tokens por llamada)."""
+    def best_pairs(self, tokens: list[str], prefer: dict[str, str] | None = None) -> dict[str, dict]:
+        """Par de cada token (DexScreener, 30 tokens por llamada): el pool indicado en `prefer` (donde
+        se compró) si existe; si no, el más líquido contra SOL/USDC. Los pares contra otros tokens se
+        ignoran: así se crean pools falsos con liquidez y precio inventados."""
+        prefer = prefer or {}
         out: dict[str, dict] = {}
         for i in range(0, len(tokens), 30):
             try:
@@ -511,6 +527,13 @@ class Sim:
                 continue
             for pair in pairs or []:
                 tok = pair["baseToken"]["address"]
+                if (pair.get("quoteToken") or {}).get("address") not in QUOTES:
+                    continue
+                if prefer.get(tok) and out.get(tok, {}).get("pairAddress") == prefer[tok]:
+                    continue  # ya tenemos el pool de la compra
+                if prefer.get(tok) == pair.get("pairAddress"):
+                    out[tok] = pair
+                    continue
                 liq = float((pair.get("liquidity") or {}).get("usd") or 0)
                 if tok not in out or liq > float((out[tok].get("liquidity") or {}).get("usd") or 0):
                     out[tok] = pair
@@ -631,7 +654,8 @@ class Sim:
         if not held:
             return
         now = time.time()
-        pairs = self.with_jup_price(self.best_pairs(sorted(held)))
+        prefer = {t: p.pool for d in self.desks for t, p in d.book.positions.items()}
+        pairs = self.with_jup_price(self.best_pairs(sorted(held), prefer))
         for desk in self.desks:
             desk.manage(pairs, now, self.token_decimals)
 

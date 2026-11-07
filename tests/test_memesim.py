@@ -353,3 +353,41 @@ def test_min_age_waits_then_buys_when_old_enough(tmp_path):
         assert post.funnel["compras"] == 1
     finally:
         m.time.time = real_time
+
+
+def test_size_uses_capital_not_inflated_marks():
+    book = Book(cash=96.0)
+    p = book.open(pair(), NOW, 4.0, Fill(ok=True, raw=4_000_000_000), decimals=6)
+    p.last = 10_000.0  # precio falso
+    assert book.equity() > 1_000_000
+    assert book.capital() == pytest.approx(96.0)  # 92 de efectivo + 4 de costo
+
+
+def test_best_pairs_prefers_bought_pool_and_ignores_foreign_quotes(tmp_path):
+    from solbot.memesim import Sim
+
+    sim = Sim(tmp_path, RULES, rpc_url="http://unused")
+    real = pair(pairAddress="REAL", liquidity={"usd": 100.0, "base": 1, "quote": 1})
+    fake = pair(pairAddress="FAKE", liquidity={"usd": 380e6, "base": 1, "quote": 1}, priceUsd="0.45")
+    foreign = pair(pairAddress="FOREIGN", quoteToken={"address": "OTHER", "symbol": "X"},
+                   liquidity={"usd": 1e9, "base": 1, "quote": 1})
+    sim._get = lambda url, **kw: [fake, real, foreign]
+    assert sim.best_pairs(["MINT"], prefer={"MINT": "REAL"})["MINT"]["pairAddress"] == "REAL"
+    assert sim.best_pairs(["MINT"])["MINT"]["pairAddress"] == "FAKE"  # sin compra previa: el más líquido
+    sim._get = lambda url, **kw: [foreign]
+    assert sim.best_pairs(["MINT"]) == {}
+
+
+def test_price_spike_needs_confirmation(tmp_path):
+    from solbot.memesim import Sim
+
+    sim = Sim(tmp_path, RULES, rpc_url="http://unused")
+    desk = sim.desks[0]
+    p = desk.book.open(pair(), NOW, 4.0, Fill(ok=True, raw=4_000_000_000), decimals=6)
+    sold = []
+    desk.execute_sell = lambda *a, **k: sold.append(a)
+    spiked = {"MINT": pair(priceUsd="0.45")}
+    desk.manage(spiked, NOW + 5, lambda t: 6)
+    assert p.last == 0.001 and sold == [] and desk.funnel["precio_sospechoso"] == 1
+    desk.manage(spiked, NOW + 10, lambda t: 6)  # se repite: se acepta
+    assert p.last == 0.45 and sold
