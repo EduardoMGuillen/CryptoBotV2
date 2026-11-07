@@ -50,6 +50,8 @@
     alerta_rug: "Alerta de rug", momentum: "Momentum", pocas_grandes: "Pocas y grandes", loteria_3x: "Lotería 3x",
     solo_pump: "Solo pump.fun", solo_pump_1_5x: "Solo pump.fun, todo a 1.5x",
     solo_pump_30m: "Pump.fun, 30 min", solo_pump_momentum: "Pump.fun + momentum",
+    acc_spy: "Acciones: S&P 500", acc_tendencia: "Acciones: tendencia", acc_ruptura: "Acciones: ruptura",
+    acc_rsi2: "Acciones: rebote RSI-2", acc_rotacion: "Acciones: rotación",
   };
   const VARIANT_HELP = {
     principal: "Sin copias, espera 5 min, vende la mitad a 1.5x y el resto con trailing de 25 %. Stop −20 %, sale si la liquidez cae 20 %.",
@@ -66,6 +68,11 @@
     solo_pump_1_5x: "Solo monedas de pump.fun; vende todo a 1.5x, stop −20 %.",
     solo_pump_30m: "Solo pump.fun y con al menos 30 min de vida; salidas como Principal.",
     solo_pump_momentum: "Solo pump.fun con 1.5 compras por venta en 5 min; vende todo a 1.5x.",
+    acc_spy: "Referencia: compra SPYx (S&P 500) y no hace nada más.",
+    acc_tendencia: "7 acciones volátiles; cada una dentro solo si cerró sobre su media de 50 días.",
+    acc_ruptura: "Entra al romper el máximo de 20 días, sale al perder el mínimo de 10. Máx 4.",
+    acc_rsi2: "Compra tras 2 días de caída fuerte en tendencia alcista; vende al primer rebote. Máx 4.",
+    acc_rotacion: "Cada viernes elige las 2 acciones volátiles más fuertes y las mantiene la semana.",
   };
   const ROOT = "principal";
   let variant = (location.hash.match(/v=([a-z0-9_]+)/) || [])[1] || ROOT;
@@ -193,6 +200,7 @@
   };
 
   function renderGates(s) {
+    document.querySelector(".sieve").hidden = variant.startsWith("acc_");
     const counts = gateCounts(s.funnel);
     const list = $("#gates");
     list.replaceChildren();

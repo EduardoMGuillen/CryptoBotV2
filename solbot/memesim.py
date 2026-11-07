@@ -38,7 +38,7 @@ from pathlib import Path
 
 import requests
 
-from .jupiter import SOL_MINT, Jupiter, JupiterError
+from .jupiter import SOL_MINT, USDC_MINT, Jupiter, JupiterError
 from .market import last_price
 from .rpc import resolve_url
 
@@ -129,8 +129,9 @@ class Fill:
 class TxSim:
     """Transacción en papel: cotización real de Jupiter tras un retraso, con fallos y comisiones."""
 
-    def __init__(self, quote, sol_price, rules: Rules, rng=random.random, sleep=time.sleep):
+    def __init__(self, quote, sol_price, rules: Rules, rng=random.random, sleep=time.sleep, quote_mint: str = SOL_MINT):
         self.quote, self.sol_price, self.rules, self.rng, self.sleep = quote, sol_price, rules, rng, sleep
+        self.quote_mint = quote_mint  # con qué se paga y en qué se cobra (SOL para memecoins, USDC para acciones)
 
     def _net_fee(self) -> float:
         return self.rules.network_fee_sol * self.sol_price()
@@ -152,11 +153,13 @@ class TxSim:
         return Fill(ok=True, usd=usd, raw=out, fee_usd=fee)
 
     def buy(self, mint: str, usd: float) -> Fill:
+        if self.quote_mint == USDC_MINT:
+            return self._swap(USDC_MINT, mint, int(usd * 1e6))
         lamports = int(usd / self.sol_price() * 1e9)
         return self._swap(SOL_MINT, mint, lamports)
 
     def sell(self, mint: str, raw: int) -> Fill:
-        fill = self._swap(mint, SOL_MINT, raw)
+        fill = self._swap(mint, self.quote_mint, raw)
         if fill.ok:
             fill.usd = max(0.0, fill.usd - fill.fee_usd)
         return fill
