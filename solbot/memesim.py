@@ -73,6 +73,7 @@ class Rules:
     latency_s: float = 1.5
     max_no_route: int = 3
     max_open: int = 10
+    skip_copycats: bool = False  # no comprar si otra moneda más antigua ya usa el mismo nombre
 
 
 # ---- reglas puras ---------------------------------------------------------------------------
@@ -239,39 +240,37 @@ class Book:
 
 # ---- simulador en vivo ----------------------------------------------------------------------
 
-class Sim:
-    def __init__(self, folder: Path, rules: Rules, rpc_url: str, start_cash: float = 100.0):
-        self.folder, self.rules, self.rpc_url = folder, rules, rpc_url
-        self.http = requests.Session()
-        self.http.headers["accept"] = "application/json"
+VARIANT_RE = re.compile(r"^[a-z0-9_]{1,32}$")
+
+
+def symbol_key(symbol: str) -> str:
+    return "".join(ch for ch in (symbol or "").casefold() if ch.isalnum())
+
+
+class Desk:
+    """Un libro en papel con sus reglas. Varias mesas comparten el mismo escáner y los mismos
+    precios, así se comparan variantes de estrategia sobre exactamente las mismas monedas."""
+
+    def __init__(self, name: str, folder: Path, rules: Rules, tx: TxSim, start_cash: float = 100.0):
+        self.name, self.folder, self.rules, self.tx = name, folder, rules, tx
         self.folder.mkdir(parents=True, exist_ok=True)
         self.state_path = folder / "state.json"
-        self.watch: dict[str, float] = {}  # token -> primera vez visto
-        self.checked: dict[str, float] = {}  # token -> cuándo se revisaron holders (rechazado)
         self.funnel: dict[str, int] = {"vistos": 0}
         self.book = Book(cash=start_cash, start=time.time())
-        self.decimals: dict[str, int] = {}
-        self._sol = (0.0, 0.0)  # (precio, cuándo)
-        self.jupiter = Jupiter(session=self.http)
-        self.tx = TxSim(self.jupiter.order, self.sol_price, rules)
-        self._load()
+        self.extra: dict = {}
+        if self.state_path.exists():
+            st = json.loads(self.state_path.read_text())
+            self.book = Book(cash=st["cash"], start=st["start"], closed=st["closed"],
+                             positions={k: Position(**v) for k, v in st["positions"].items()})
+            self.funnel = st["funnel"]
+            self.extra = {k: st[k] for k in ("checked",) if k in st}
 
-    # -- persistencia
-    def _load(self) -> None:
-        if not self.state_path.exists():
-            return
-        s = json.loads(self.state_path.read_text())
-        self.book = Book(cash=s["cash"], start=s["start"], closed=s["closed"],
-                         positions={k: Position(**v) for k, v in s["positions"].items()})
-        self.funnel = s["funnel"]
-        self.checked = s.get("checked", {})
-
-    def save(self) -> None:
-        s = {"cash": self.book.cash, "start": self.book.start, "funnel": self.funnel, "closed": self.book.closed,
-             "positions": {k: asdict(v) for k, v in self.book.positions.items()},
-             "equity": self.book.equity(), "saved": time.time(), "checked": self.checked}
+    def save(self, **extra) -> None:
+        st = {"cash": self.book.cash, "start": self.book.start, "funnel": self.funnel, "closed": self.book.closed,
+              "positions": {k: asdict(v) for k, v in self.book.positions.items()}, "variant": self.name,
+              "rules": asdict(self.rules), "equity": self.book.equity(), "saved": time.time(), **extra}
         tmp = self.state_path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(s))
+        tmp.write_text(json.dumps(st))
         tmp.replace(self.state_path)
 
     def event(self, **kw) -> None:
@@ -294,6 +293,137 @@ class Sim:
 
     def count(self, key: str) -> None:
         self.funnel[key] = self.funnel.get(key, 0) + 1
+
+    def _tx_failed(self, fill: Fill) -> None:
+        self.count("tx_fallidas" if fill.note == "fallo" else f"tx_{fill.note}")
+
+    def try_buy(self, pair: dict, now: float, decimals, is_copy: bool) -> None:
+        token = pair["baseToken"]["address"]
+        symbol = pair["baseToken"].get("symbol", "?")
+        if token in self.book.positions:
+            return
+        if self.rules.skip_copycats and is_copy:
+            self.count("rechazo_copia")
+            return
+        if not self.book.can_open(self.rules):
+            self.count("sin_cupo")
+            return
+        usd = min(self.book.equity() * self.rules.size_frac, self.book.cash)
+        fill = self.tx.buy(token, usd)
+        self.count("tx_intentos")
+        if not fill.ok:
+            self.book.pay_fee(None, fill.fee_usd)
+            self._tx_failed(fill)
+            self.count("compra_fallida")
+            self.event(kind="fail", side="buy", token=token, symbol=symbol, note=fill.note, fee=fill.fee_usd)
+            log.info("[%s] COMPRA FALLIDA %s (%s)", self.name, symbol, fill.note)
+            return
+        self.count("tx_ok")
+        p = self.book.open(pair, now, usd, fill, decimals(token))
+        self.record_price(token, now, p.entry, p.entry_liq)
+        self.count("compras")
+        self.event(kind="buy", token=token, symbol=p.symbol, price=p.entry, usd=usd, got_usd=fill.usd,
+                   fee=fill.fee_usd, liq=p.entry_liq, age_min=(now - pair["pairCreatedAt"] / 1000) / 60)
+        log.info("[%s] COMPRA %s %.2f USD (recibe %.2f en tokens) a %.8g (liq %.0f)",
+                 self.name, p.symbol, usd, fill.usd, p.entry, p.entry_liq)
+
+    def manage(self, pairs: dict, now: float, decimals) -> None:
+        for token, p in list(self.book.positions.items()):
+            pair = pairs.get(token)
+            if pair is None:
+                continue
+            price = float(pair.get("priceUsd") or 0)
+            liq = float((pair.get("liquidity") or {}).get("usd") or 0)
+            p.last = price
+            self.record_price(token, now, price, liq)
+            for frac, reason in step_position(p, price, liq, now, self.rules):
+                self.execute_sell(p, frac, reason, price, now, decimals)
+            p.peak = max(p.peak, price)
+
+    def execute_sell(self, p: Position, frac: float, reason: str, price: float, now: float, decimals) -> None:
+        if p.decimals < 0:
+            p.decimals = decimals(p.token)
+        qty = p.qty if frac >= 1.0 else p.qty * frac
+        raw = int(qty * 10 ** p.decimals)
+        fill = self.tx.sell(p.token, raw)
+        self.count("tx_intentos")
+        if not fill.ok:
+            self.book.pay_fee(p, fill.fee_usd)
+            self._tx_failed(fill)
+            self.event(kind="fail", side="sell", token=p.token, symbol=p.symbol, note=fill.note, reason=reason,
+                       fee=fill.fee_usd, mult=price / p.entry)
+            log.info("[%s] VENTA FALLIDA %s (%s, %s): se reintenta", self.name, p.symbol, reason, fill.note)
+            if fill.note == "sin_ruta":
+                p.no_route += 1
+                if p.no_route >= self.rules.max_no_route:  # nadie te compra: se pierde lo que queda
+                    self.book.close(p, now, "sin_ruta")
+                    self.event(kind="sell", token=p.token, symbol=p.symbol, price=price, frac=1.0, usd=0.0,
+                               reason="sin_ruta", mult=0.0)
+            return
+        self.count("tx_ok")
+        self.book.sell(p, qty, fill.usd, fill.fee_usd, now, reason)
+        # real_mult: lo que de verdad se obtuvo por token frente a la entrada (impacto y comisiones)
+        real_mult = (fill.usd / qty) / p.entry if qty else 0.0
+        self.event(kind="sell", token=p.token, symbol=p.symbol, price=price, frac=frac, usd=fill.usd,
+                   fee=fill.fee_usd, reason=reason, mult=price / p.entry, real_mult=real_mult)
+        log.info("[%s] VENDE %s %.0f%% (%s): pantalla x%.2f, ejecutado x%.2f → %.2f USD",
+                 self.name, p.symbol, frac * 100, reason, price / p.entry, real_mult, fill.usd)
+
+
+# Variantes que corren en paralelo. "post" son las reglas del post, sin tocar; está en la
+# carpeta raíz para no perder su historial. Cada cambio se registra en data/meme/journal.md.
+VARIANTS = {
+    "post": Rules(),
+    "sin_copias": Rules(skip_copycats=True),
+}
+
+
+class Sim:
+    def __init__(self, folder: Path, rules: Rules, rpc_url: str, start_cash: float = 100.0,
+                 variants: dict[str, Rules] | None = None):
+        self.folder, self.rules, self.rpc_url = folder, rules, rpc_url
+        self.http = requests.Session()
+        self.http.headers["accept"] = "application/json"
+        self.folder.mkdir(parents=True, exist_ok=True)
+        self.watch: dict[str, float] = {}  # token -> primera vez visto
+        self.decimals: dict[str, int] = {}
+        self.symbols: dict[str, tuple[str, float]] = {}  # símbolo -> (mint más antiguo, creado ms)
+        self._sol = (0.0, 0.0)  # (precio, cuándo)
+        self.jupiter = Jupiter(session=self.http)
+        variants = variants or {"post": rules}
+        self.desks: list[Desk] = []
+        for name, vrules in variants.items():
+            vfolder = folder if not self.desks else folder / "variants" / name
+            self.desks.append(Desk(name, vfolder, vrules, TxSim(self.jupiter.order, self.sol_price, vrules), start_cash))
+        self.checked: dict[str, float] = self.desks[0].extra.get("checked", {})
+
+    # compatibilidad: la mesa principal
+    @property
+    def book(self) -> Book:
+        return self.desks[0].book
+
+    @property
+    def funnel(self) -> dict:
+        return self.desks[0].funnel
+
+    @property
+    def tx(self) -> TxSim:
+        return self.desks[0].tx
+
+    def execute_sell(self, p, frac, reason, price, now) -> None:
+        self.desks[0].execute_sell(p, frac, reason, price, now, self.token_decimals)
+
+    def count(self, key: str) -> None:
+        for d in self.desks:  # lo que decide el escáner cuenta igual para todas las mesas
+            d.count(key)
+
+    def save(self) -> None:
+        for i, d in enumerate(self.desks):
+            d.save(**({"checked": self.checked} if i == 0 else {}))
+
+    def record_equity(self) -> None:
+        for d in self.desks:
+            d.record_equity()
 
     # -- datos
     def _get(self, url: str, **params):
@@ -331,10 +461,14 @@ class Sim:
             raise RuntimeError(f"{method}: {body['error'].get('message')}")
         return body["result"]
 
+    def held(self) -> set[str]:
+        return {t for d in self.desks for t in d.book.positions}
+
     def discover(self) -> None:
         now = time.time()
         sources = [(f"{GECKO}/new_pools", {"page": p, "include": "base_token"}) for p in (1, 2)]
         sources += [(f"{GECKO}/trending_pools", {"duration": d, "include": "base_token"}) for d in ("5m", "1h")]
+        held = self.held()
         for url, params in sources:
             try:
                 data = self._get(url, **params)
@@ -342,9 +476,8 @@ class Sim:
                 log.warning("GeckoTerminal: %s", exc)
                 continue
             for pool in data.get("data", []):
-                created = pool["attributes"].get("pool_created_at") or ""
                 token = pool["relationships"]["base_token"]["data"]["id"].split("_", 1)[1]
-                if token in QUOTES or token in self.watch or token in self.book.positions:
+                if token in QUOTES or token in self.watch or token in held:
                     continue
                 self.watch[token] = now
                 self.count("vistos")
@@ -368,7 +501,20 @@ class Sim:
                 liq = float((pair.get("liquidity") or {}).get("usd") or 0)
                 if tok not in out or liq > float((out[tok].get("liquidity") or {}).get("usd") or 0):
                     out[tok] = pair
+        for pair in out.values():
+            self.note_symbol(pair)
         return out
+
+    def note_symbol(self, pair: dict) -> None:
+        key = symbol_key(pair["baseToken"].get("symbol", ""))
+        created = pair.get("pairCreatedAt") or float("inf")
+        if key and (key not in self.symbols or created < self.symbols[key][1]):
+            self.symbols[key] = (pair["baseToken"]["address"], created)
+
+    def is_copy(self, pair: dict) -> bool:
+        """Otra moneda más antigua ya usa este nombre: típico de copias que terminan en rug."""
+        first = self.symbols.get(symbol_key(pair["baseToken"].get("symbol", "")))
+        return bool(first) and first[0] != pair["baseToken"]["address"]
 
     def holders_ok(self, pair: dict) -> str | None:
         token = pair["baseToken"]["address"]
@@ -399,7 +545,8 @@ class Sim:
 
     def evaluate(self) -> None:
         now = time.time()
-        tokens = [t for t in self.watch if t not in self.checked and t not in self.book.positions]
+        held = self.held()
+        tokens = [t for t in self.watch if t not in self.checked and t not in held]
         pairs = self.best_pairs(tokens)
         for token in tokens:  # los que siguen muertos tras 30 min no se vuelven a consultar
             pair = pairs.get(token)
@@ -424,76 +571,21 @@ class Sim:
             if reason:
                 self.count(f"rechazo_{reason}")
                 continue
-            if not self.book.can_open(self.rules):
-                self.count("sin_cupo")
-                continue
-            usd = min(self.book.equity() * self.rules.size_frac, self.book.cash)
-            symbol = pair["baseToken"].get("symbol", "?")
-            fill = self.tx.buy(token, usd)
-            self.count("tx_intentos")
-            if not fill.ok:
-                self.book.pay_fee(None, fill.fee_usd)
-                self.count("tx_fallidas" if fill.note == "fallo" else f"tx_{fill.note}")
-                self.count("compra_fallida")
-                self.event(kind="fail", side="buy", token=token, symbol=symbol, note=fill.note, fee=fill.fee_usd)
-                log.info("COMPRA FALLIDA %s (%s)", symbol, fill.note)
-                continue
-            self.count("tx_ok")
-            p = self.book.open(pair, now, usd, fill, self.token_decimals(token))
-            self.record_price(token, now, p.entry, p.entry_liq)
-            self.count("compras")
-            self.event(kind="buy", token=token, symbol=p.symbol, price=p.entry, usd=usd, got_usd=fill.usd,
-                       fee=fill.fee_usd, liq=p.entry_liq, age_min=(now - pair["pairCreatedAt"] / 1000) / 60)
-            log.info("COMPRA %s %.2f USD (recibe %.2f en tokens) a %.8g (liq %.0f)", p.symbol, usd, fill.usd, p.entry, p.entry_liq)
+            copy = self.is_copy(pair)
+            for desk in self.desks:
+                desk.try_buy(pair, now, self.token_decimals, copy)
 
     def manage(self) -> None:
-        if not self.book.positions:
+        held = self.held()
+        if not held:
             return
         now = time.time()
-        pairs = self.best_pairs(list(self.book.positions))
-        for token, p in list(self.book.positions.items()):
-            pair = pairs.get(token)
-            if pair is None:
-                continue
-            price = float(pair.get("priceUsd") or 0)
-            liq = float((pair.get("liquidity") or {}).get("usd") or 0)
-            p.last = price
-            self.record_price(token, now, price, liq)
-            for frac, reason in step_position(p, price, liq, now, self.rules):
-                self.execute_sell(p, frac, reason, price, now)
-            p.peak = max(p.peak, price)
-
-    def execute_sell(self, p: Position, frac: float, reason: str, price: float, now: float) -> None:
-        if p.decimals < 0:
-            p.decimals = self.token_decimals(p.token)
-        qty = p.qty if frac >= 1.0 else p.qty * frac
-        raw = int(qty * 10 ** p.decimals)
-        fill = self.tx.sell(p.token, raw)
-        self.count("tx_intentos")
-        if not fill.ok:
-            self.book.pay_fee(p, fill.fee_usd)
-            self.count("tx_fallidas" if fill.note == "fallo" else f"tx_{fill.note}")
-            self.event(kind="fail", side="sell", token=p.token, symbol=p.symbol, note=fill.note, reason=reason,
-                       fee=fill.fee_usd, mult=price / p.entry)
-            log.info("VENTA FALLIDA %s (%s, %s): se reintenta", p.symbol, reason, fill.note)
-            if fill.note == "sin_ruta":
-                p.no_route += 1
-                if p.no_route >= self.rules.max_no_route:  # nadie te compra: se pierde lo que queda
-                    self.book.close(p, now, "sin_ruta")
-                    self.event(kind="sell", token=p.token, symbol=p.symbol, price=price, frac=1.0, usd=0.0,
-                               reason="sin_ruta", mult=0.0)
-            return
-        self.count("tx_ok")
-        self.book.sell(p, qty, fill.usd, fill.fee_usd, now, reason)
-        # mult: lo que de verdad se obtuvo por token frente a la entrada (incluye impacto y comisiones)
-        real_mult = (fill.usd / qty) / p.entry if qty else 0.0
-        self.event(kind="sell", token=p.token, symbol=p.symbol, price=price, frac=frac, usd=fill.usd,
-                   fee=fill.fee_usd, reason=reason, mult=price / p.entry, real_mult=real_mult)
-        log.info("VENDE %s %.0f%% (%s): pantalla x%.2f, ejecutado x%.2f → %.2f USD",
-                 p.symbol, frac * 100, reason, price / p.entry, real_mult, fill.usd)
+        pairs = self.best_pairs(sorted(held))
+        for desk in self.desks:
+            desk.manage(pairs, now, self.token_decimals)
 
     def run(self) -> None:
-        log.info("memesim en papel: libro %.2f USD", self.book.equity())
+        log.info("memesim en papel: %s", ", ".join(f"{d.name} {d.book.equity():.2f} USD" for d in self.desks))
         last_discover = 0.0
         while True:
             try:
@@ -574,6 +666,32 @@ def snapshot(folder: Path, start_cash: float = 100.0) -> dict:
     }
 
 
+def variant_folder(root: Path, name: str | None) -> Path:
+    """Carpeta de una variante ("post" o vacío: la raíz). Valida el nombre: viene de la URL."""
+    if not name or name == "post":
+        return root
+    if not VARIANT_RE.match(name):
+        raise ValueError("Variante inválida.")
+    return root / "variants" / name
+
+
+def variants_summary(root: Path) -> list[dict]:
+    """Resumen de cada variante, desde su propio inicio (cada una arrancó en su momento)."""
+    names = ["post"] + sorted(p.name for p in (root / "variants").glob("*") if p.is_dir() and VARIANT_RE.match(p.name))
+    out = []
+    for name in names:
+        path = variant_folder(root, name) / "state.json"
+        if not path.exists():
+            continue
+        st = json.loads(path.read_text())
+        closed = st["closed"]
+        out.append({"name": name, "equity": st["equity"], "start": st["start"], "closed": len(closed),
+                    "wins": sum(1 for c in closed if c["pnl"] > 0), "open": len(st["positions"]),
+                    "realized": sum(c["pnl"] for c in closed),
+                    "skip_copycats": bool((st.get("rules") or {}).get("skip_copycats"))})
+    return out
+
+
 def trade_detail(folder: Path, token: str, max_points: int = 600) -> dict:
     """Historial de precio y registro de una operación (abierta o cerrada)."""
     if not MINT_RE.match(token or ""):
@@ -626,7 +744,7 @@ def main() -> None:
         print(status(folder))
         return
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
-    Sim(folder, Rules(), resolve_url(dict(os.environ), args.env_file)).run()
+    Sim(folder, Rules(), resolve_url(dict(os.environ), args.env_file), variants=VARIANTS).run()
 
 
 if __name__ == "__main__":

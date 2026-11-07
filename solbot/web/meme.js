@@ -43,6 +43,10 @@
   const isGoodExit = (r) => r === "trailing" || (r || "").startsWith("tp");
 
   let snap = null;
+  const VARIANT_NAMES = { post: "Reglas del post", sin_copias: "Sin copias" };
+  const VARIANT_HELP = { post: "Las reglas tal cual las publican.", sin_copias: "Igual, pero no compra monedas que copian el nombre de otra." };
+  let variant = (location.hash.match(/v=([a-z0-9_]+)/) || [])[1] || "post";
+  const vq = () => (variant === "post" ? "" : "v=" + encodeURIComponent(variant));
 
   // ======================================================================= colador
   // Orden en que una moneda enfrenta los filtros; cada puerta agrupa motivos del embudo.
@@ -529,7 +533,7 @@
     lastFocus = document.activeElement;
     let d;
     try {
-      const res = await fetch("/api/meme/trade?token=" + encodeURIComponent(token), { cache: "no-store" });
+      const res = await fetch("/api/meme/trade?token=" + encodeURIComponent(token) + (vq() ? "&" + vq() : ""), { cache: "no-store" });
       d = await res.json();
       if (!res.ok) throw new Error(d.error || res.status);
     } catch (err) {
@@ -630,8 +634,12 @@
   async function tick() {
     let s;
     try {
-      const res = await fetch("/api/meme", { cache: "no-store" });
+      const [res, vres] = await Promise.all([
+        fetch("/api/meme" + (vq() ? "?" + vq() : ""), { cache: "no-store" }),
+        fetch("/api/meme/variants", { cache: "no-store" }),
+      ]);
       s = await res.json();
+      renderVariants(await vres.json());
     } catch (err) {
       $("#updated").textContent = "No se pudo leer el simulador. Revisa que Solbot siga corriendo.";
       $("#pulse").className = "pulse is-stale";
@@ -653,6 +661,44 @@
     const age = Date.now() / 1000 - s.updated;
     $("#pulse").className = "pulse " + (age < 120 ? "is-live" : "is-stale");
     $("#updated").textContent = age < 120 ? `En vivo, ${hm.format(new Date(s.updated * 1000))}` : `Sin datos nuevos desde ${dhm.format(new Date(s.updated * 1000))}. ¿El simulador está corriendo?`;
+  }
+
+  function renderVariants(list) {
+    const nav = $("#variants");
+    if (!Array.isArray(list) || list.length < 2) { nav.hidden = true; return; }
+    nav.hidden = false;
+    nav.replaceChildren();
+    for (const v of list) {
+      const b = el("button", "variant");
+      b.type = "button";
+      b.setAttribute("aria-pressed", String(v.name === variant));
+      b.title = VARIANT_HELP[v.name] || "";
+      const change = v.equity - 100;
+      const meta = el("span", "variant__meta");
+      meta.append(el("b", tone(change), money(v.equity)), document.createTextNode(` · ${v.closed} cerradas desde ${at(v.start)}`));
+      b.append(el("span", "variant__name", VARIANT_NAMES[v.name] || v.name), meta);
+      b.addEventListener("click", () => switchVariant(v.name));
+      nav.append(b);
+    }
+  }
+
+  function switchVariant(name) {
+    if (name === variant) return;
+    variant = name;
+    history.replaceState(null, "", name === "post" ? location.pathname : "#v=" + name);
+    // Cada variante es otro libro: se reinicia lo que la página recuerda del anterior.
+    shownValue = null;
+    seenEvents.clear();
+    seenBuys.clear();
+    firstTape = true;
+    firstLoad = true;
+    sieve.prevCounts = null;
+    sieve.dots = [];
+    sieve.queue = [];
+    const svgRoot = $("#radar svg");
+    if (svgRoot) svgRoot.remove();
+    if (curveChart) { curveChart.remove(); curveChart = null; curveSeries = null; }
+    tick();
   }
 
   window.addEventListener("resize", () => snap && renderRadar(snap));

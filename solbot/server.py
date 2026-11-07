@@ -34,8 +34,10 @@ GET_ROUTES = {
     "/api/backtest": lambda app, q: app.backtest(),
     "/api/chart": lambda app, q: app.chart(int(q.get("days", ["365"])[0])),
     "/api/tickers": lambda app, q: app.tickers(),
-    "/api/meme": lambda app, q: memesim.snapshot(app.cfg.data_dir / "meme"),
-    "/api/meme/trade": lambda app, q: memesim.trade_detail(app.cfg.data_dir / "meme", q.get("token", [""])[0]),
+    "/api/meme": lambda app, q: memesim.snapshot(memesim.variant_folder(app.cfg.data_dir / "meme", q.get("v", [""])[0])),
+    "/api/meme/variants": lambda app, q: memesim.variants_summary(app.cfg.data_dir / "meme"),
+    "/api/meme/trade": lambda app, q: memesim.trade_detail(
+        memesim.variant_folder(app.cfg.data_dir / "meme", q.get("v", [""])[0]), q.get("token", [""])[0]),
 }
 POST_ROUTES = {
     "/api/bot/start": lambda app, body: app.start(confirm=body.get("confirm")),

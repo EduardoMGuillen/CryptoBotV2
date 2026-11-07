@@ -270,3 +270,43 @@ def test_sim_sell_records_real_multiple(tmp_path):
     event = json.loads((tmp_path / "events.jsonl").read_text().splitlines()[-1])
     assert event["mult"] == pytest.approx(0.74)
     assert event["real_mult"] == pytest.approx(0.25)
+
+
+def test_copycat_detection_uses_oldest_mint_with_same_name(tmp_path):
+    from solbot.memesim import Sim
+
+    sim = Sim(tmp_path, RULES, rpc_url="http://unused")
+    original = pair(baseToken={"address": "ORIG", "symbol": "Karl"}, pairCreatedAt=1000)
+    copy = pair(baseToken={"address": "COPY", "symbol": "KARL "}, pairCreatedAt=2000)
+    sim.note_symbol(copy)
+    sim.note_symbol(original)
+    assert not sim.is_copy(original)
+    assert sim.is_copy(copy)
+
+
+def test_variants_decide_independently_on_same_candidate(tmp_path):
+    from solbot.memesim import Sim
+
+    sim = Sim(tmp_path, RULES, rpc_url="http://unused",
+              variants={"post": Rules(), "sin_copias": Rules(skip_copycats=True)})
+    for d in sim.desks:
+        d.tx.buy = lambda mint, usd: Fill(ok=True, usd=usd, raw=4_000_000_000, fee_usd=0.0)
+    for d in sim.desks:
+        d.try_buy(pair(), NOW, lambda t: 6, is_copy=True)
+    post, clean = sim.desks
+    assert "MINT" in post.book.positions
+    assert clean.book.positions == {} and clean.funnel["rechazo_copia"] == 1
+    assert clean.folder == tmp_path / "variants" / "sin_copias"
+    sim.save()
+    assert (tmp_path / "state.json").exists() and (tmp_path / "variants" / "sin_copias" / "state.json").exists()
+
+
+def test_variant_folder_validates_names(tmp_path):
+    from solbot.memesim import variant_folder
+
+    assert variant_folder(tmp_path, "") == tmp_path
+    assert variant_folder(tmp_path, "post") == tmp_path
+    assert variant_folder(tmp_path, "sin_copias") == tmp_path / "variants" / "sin_copias"
+    for bad in ("../x", "A", "a/b", "x" * 40):
+        with pytest.raises(ValueError):
+            variant_folder(tmp_path, bad)

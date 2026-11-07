@@ -60,6 +60,19 @@ a { color: inherit; }
 .pulse.is-stale { background: var(--loss); }
 @keyframes ping { 70% { box-shadow: 0 0 0 9px rgba(20, 241, 149, 0); } 100% { box-shadow: 0 0 0 0 rgba(20, 241, 149, 0); } }
 
+/* ---- variantes ---- */
+.variants { display: flex; gap: 10px; flex-wrap: wrap; margin: 26px 0 -14px; }
+.variant {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 2px; min-width: 170px;
+  padding: 10px 16px; border-radius: 14px; border: 1px solid var(--line); background: var(--bg-2);
+  cursor: pointer; text-align: left;
+}
+.variant:hover { border-color: var(--line-2); }
+.variant[aria-pressed="true"] { border-color: var(--sol); background: var(--sol-soft); }
+.variant__name { font-weight: 600; font-size: 14px; }
+.variant__meta { color: var(--muted); font-size: 12.5px; }
+.variant__meta b { font-weight: 600; }
+
 /* ---- héroe: dinero + colador ---- */
 .hero { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); gap: 36px; align-items: stretch; margin: 40px 0 28px; }
 .hero__money { display: flex; flex-direction: column; justify-content: center; }
