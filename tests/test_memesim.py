@@ -310,3 +310,15 @@ def test_variant_folder_validates_names(tmp_path):
     for bad in ("../x", "A", "a/b", "x" * 40):
         with pytest.raises(ValueError):
             variant_folder(tmp_path, bad)
+
+
+def test_with_jup_price_overrides_dexscreener_price(tmp_path):
+    from solbot.memesim import Sim
+
+    sim = Sim(tmp_path, RULES, rpc_url="http://unused")
+    sim._get = lambda url, **params: {"MINT": {"usdPrice": 0.002, "decimals": 6}}
+    out = sim.with_jup_price({"MINT": pair(), "GONE": pair(baseToken={"address": "GONE", "symbol": "G"})})
+    assert out["MINT"]["priceUsd"] == "0.002" and out["MINT"]["dexPriceUsd"] == "0.001"
+    assert out["MINT"]["liquidity"]["usd"] == 30_000  # la liquidez sigue siendo la de DexScreener
+    assert out["GONE"]["priceUsd"] == "0.001"  # sin precio de Jupiter se usa el de DexScreener
+    assert sim.decimals["MINT"] == 6

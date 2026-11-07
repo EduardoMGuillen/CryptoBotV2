@@ -15,7 +15,9 @@ Cada compra y venta se simula como una transacción real (`TxSim`):
     y la venta se reintenta en la siguiente revisión, con el precio que haya entonces;
   - comisión de red + prioridad por intento y 1 % de la plataforma del bot;
   - si Jupiter no encuentra ruta (sacaron la liquidez), tras 3 intentos se da por perdida.
-Los precios se revisan cada 5 s. Un stop de −25 % puede ejecutarse mucho peor: eso es real.
+Los precios se revisan cada 5 s con la API de precios de Jupiter (la misma fuente con la que se
+ejecuta: combina todos los pools). DexScreener solo da la liquidez para detectar rugs; su precio
+es el de UN pool y a veces difiere mucho del real. Un stop de −25 % puede ejecutarse mucho peor: eso es real.
 
 Fuentes: GeckoTerminal (pools nuevos y en tendencia), DexScreener (precio y liquidez),
 RPC de Solana (holders y autoridades del mint).
@@ -52,6 +54,7 @@ POOL_AUTHORITIES = {
 }
 GECKO = "https://api.geckoterminal.com/api/v2/networks/solana"
 DEX = "https://api.dexscreener.com"
+JUP_PRICE = "https://lite-api.jup.ag/price/v3"
 MINT_RE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")  # base58: también evita rutas raras en disco
 
 
@@ -505,6 +508,28 @@ class Sim:
             self.note_symbol(pair)
         return out
 
+    def jup_prices(self, tokens: list[str]) -> dict[str, float]:
+        out: dict[str, float] = {}
+        for i in range(0, len(tokens), 50):
+            try:
+                data = self._get(JUP_PRICE, ids=",".join(tokens[i:i + 50]))
+            except Exception as exc:
+                log.warning("Precios de Jupiter: %s", exc)
+                continue
+            for tok, info in (data or {}).items():
+                price = (info or {}).get("usdPrice")
+                if price:
+                    out[tok] = float(price)
+                if (info or {}).get("decimals") is not None:
+                    self.decimals.setdefault(tok, int(info["decimals"]))
+        return out
+
+    def with_jup_price(self, pairs: dict[str, dict]) -> dict[str, dict]:
+        """Mismo par de DexScreener (liquidez), pero con el precio de Jupiter (el ejecutable)."""
+        prices = self.jup_prices(sorted(pairs))
+        return {t: {**pair, "priceUsd": str(prices[t]), "dexPriceUsd": pair.get("priceUsd")} if t in prices else pair
+                for t, pair in pairs.items()}
+
     def note_symbol(self, pair: dict) -> None:
         key = symbol_key(pair["baseToken"].get("symbol", ""))
         created = pair.get("pairCreatedAt") or float("inf")
@@ -572,6 +597,7 @@ class Sim:
                 self.count(f"rechazo_{reason}")
                 continue
             copy = self.is_copy(pair)
+            pair = self.with_jup_price({token: pair})[token]
             for desk in self.desks:
                 desk.try_buy(pair, now, self.token_decimals, copy)
 
@@ -580,7 +606,7 @@ class Sim:
         if not held:
             return
         now = time.time()
-        pairs = self.best_pairs(sorted(held))
+        pairs = self.with_jup_price(self.best_pairs(sorted(held)))
         for desk in self.desks:
             desk.manage(pairs, now, self.token_decimals)
 
