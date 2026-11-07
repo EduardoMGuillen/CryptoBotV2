@@ -722,7 +722,9 @@ class Sim:
     def run(self) -> None:
         log.info("memesim en papel: %s", ", ".join(f"{d.name} {d.book.equity():.2f} USD" for d in self.desks))
         last_discover = 0.0
-        last_backup = time.time()
+        # Desde el último respaldo en disco: reiniciar el simulador no debe saltarse respaldos.
+        previous = sorted((self.folder.parent / "backups").glob("meme-*.tar.gz"))
+        last_backup = previous[-1].stat().st_mtime if previous else 0.0
         while True:
             try:
                 if time.time() - last_backup >= 3600:
