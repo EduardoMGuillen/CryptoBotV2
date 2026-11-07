@@ -322,3 +322,34 @@ def test_with_jup_price_overrides_dexscreener_price(tmp_path):
     assert out["MINT"]["liquidity"]["usd"] == 30_000  # la liquidez sigue siendo la de DexScreener
     assert out["GONE"]["priceUsd"] == "0.001"  # sin precio de Jupiter se usa el de DexScreener
     assert sim.decimals["MINT"] == 6
+
+
+def test_min_age_waits_then_buys_when_old_enough(tmp_path):
+    from solbot.memesim import Sim
+
+    sim = Sim(tmp_path, RULES, rpc_url="http://unused",
+              variants={"post": Rules(), "viejas": Rules(min_age_min=30.0)})
+    for d in sim.desks:
+        d.tx.buy = lambda mint, usd: Fill(ok=True, usd=usd, raw=4_000_000_000, fee_usd=0.0)
+    sim.holders_ok = lambda pair: None
+    sim.with_jup_price = lambda pairs: pairs
+    sim.decimals["MINT"] = 6
+    young = pair(pairCreatedAt=(NOW - 10 * 60) * 1000)
+    sim.watch = {"MINT": NOW}
+    sim.best_pairs = lambda tokens: {"MINT": young} if "MINT" in tokens else {}
+    import solbot.memesim as m
+    real_time = m.time.time
+    m.time.time = lambda: NOW
+    try:
+        sim.evaluate()
+        post, old = sim.desks
+        assert "MINT" in post.book.positions and old.book.positions == {}
+        assert sim.waiting == {"MINT": {"viejas"}}
+        sim.evaluate()  # sigue muy nueva: espera, y post no compra dos veces
+        assert len(post.funnel) and post.funnel["compras"] == 1 and old.book.positions == {}
+        m.time.time = lambda: NOW + 25 * 60  # ya tiene 35 min
+        sim.evaluate()
+        assert "MINT" in old.book.positions and sim.waiting == {}
+        assert post.funnel["compras"] == 1
+    finally:
+        m.time.time = real_time

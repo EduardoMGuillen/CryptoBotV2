@@ -43,8 +43,12 @@
   const isGoodExit = (r) => r === "trailing" || (r || "").startsWith("tp");
 
   let snap = null;
-  const VARIANT_NAMES = { post: "Reglas del post", sin_copias: "Sin copias" };
-  const VARIANT_HELP = { post: "Las reglas tal cual las publican.", sin_copias: "Igual, pero no compra monedas que copian el nombre de otra." };
+  const VARIANT_NAMES = { post: "Reglas del post", sin_copias: "Sin copias", sin_copias_30m: "Sin copias, 30 min de vida" };
+  const VARIANT_HELP = {
+    post: "Las reglas tal cual las publican.",
+    sin_copias: "Igual, pero no compra monedas que copian el nombre de otra.",
+    sin_copias_30m: "Sin copias y solo compra monedas con al menos 30 minutos de vida.",
+  };
   let variant = (location.hash.match(/v=([a-z0-9_]+)/) || [])[1] || "post";
   const vq = () => (variant === "post" ? "" : "v=" + encodeURIComponent(variant));
 

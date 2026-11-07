@@ -77,6 +77,7 @@ class Rules:
     max_no_route: int = 3
     max_open: int = 10
     skip_copycats: bool = False  # no comprar si otra moneda más antigua ya usa el mismo nombre
+    min_age_min: float = 0.0  # esperar a que la moneda tenga esta edad (minutos) antes de comprar
 
 
 # ---- reglas puras ---------------------------------------------------------------------------
@@ -300,17 +301,21 @@ class Desk:
     def _tx_failed(self, fill: Fill) -> None:
         self.count("tx_fallidas" if fill.note == "fallo" else f"tx_{fill.note}")
 
-    def try_buy(self, pair: dict, now: float, decimals, is_copy: bool) -> None:
+    def try_buy(self, pair: dict, now: float, decimals, is_copy: bool) -> str | None:
+        """None si ya decidió (compró o rechazó); "wait" si la moneda es muy nueva para esta mesa."""
         token = pair["baseToken"]["address"]
         symbol = pair["baseToken"].get("symbol", "?")
         if token in self.book.positions:
-            return
+            return None
         if self.rules.skip_copycats and is_copy:
             self.count("rechazo_copia")
-            return
+            return None
+        age_min = (now - pair["pairCreatedAt"] / 1000) / 60
+        if age_min < self.rules.min_age_min:
+            return "wait"
         if not self.book.can_open(self.rules):
             self.count("sin_cupo")
-            return
+            return None
         usd = min(self.book.equity() * self.rules.size_frac, self.book.cash)
         fill = self.tx.buy(token, usd)
         self.count("tx_intentos")
@@ -320,7 +325,7 @@ class Desk:
             self.count("compra_fallida")
             self.event(kind="fail", side="buy", token=token, symbol=symbol, note=fill.note, fee=fill.fee_usd)
             log.info("[%s] COMPRA FALLIDA %s (%s)", self.name, symbol, fill.note)
-            return
+            return None
         self.count("tx_ok")
         p = self.book.open(pair, now, usd, fill, decimals(token))
         self.record_price(token, now, p.entry, p.entry_liq)
@@ -329,6 +334,7 @@ class Desk:
                    fee=fill.fee_usd, liq=p.entry_liq, age_min=(now - pair["pairCreatedAt"] / 1000) / 60)
         log.info("[%s] COMPRA %s %.2f USD (recibe %.2f en tokens) a %.8g (liq %.0f)",
                  self.name, p.symbol, usd, fill.usd, p.entry, p.entry_liq)
+        return None
 
     def manage(self, pairs: dict, now: float, decimals) -> None:
         for token, p in list(self.book.positions.items()):
@@ -378,6 +384,8 @@ class Desk:
 VARIANTS = {
     "post": Rules(),
     "sin_copias": Rules(skip_copycats=True),
+    # 2026-11-07 08:57: en "post" (31 cerradas) 17 de 22 compras con <10 min de vida fueron rug.
+    "sin_copias_30m": Rules(skip_copycats=True, min_age_min=30.0),
 }
 
 
@@ -399,6 +407,7 @@ class Sim:
             vfolder = folder if not self.desks else folder / "variants" / name
             self.desks.append(Desk(name, vfolder, vrules, TxSim(self.jupiter.order, self.sol_price, vrules), start_cash))
         self.checked: dict[str, float] = self.desks[0].extra.get("checked", {})
+        self.waiting: dict[str, set[str]] = {}  # token -> mesas que esperan a que tenga más edad
 
     # compatibilidad: la mesa principal
     @property
@@ -489,6 +498,7 @@ class Sim:
         limit = now - self.rules.max_age_h * 3600
         self.watch = {t: s for t, s in self.watch.items() if s > limit}
         self.checked = {t: s for t, s in self.checked.items() if s > limit}
+        self.waiting = {t: names for t, names in self.waiting.items() if t in self.watch}
 
     def best_pairs(self, tokens: list[str]) -> dict[str, dict]:
         """Par más líquido de cada token (DexScreener, 30 tokens por llamada)."""
@@ -572,7 +582,8 @@ class Sim:
         now = time.time()
         held = self.held()
         tokens = [t for t in self.watch if t not in self.checked and t not in held]
-        pairs = self.best_pairs(tokens)
+        due = [t for t in self.waiting if t not in tokens]
+        pairs = self.best_pairs(tokens + due)
         for token in tokens:  # los que siguen muertos tras 30 min no se vuelven a consultar
             pair = pairs.get(token)
             dead = pair is None or float((pair.get("liquidity") or {}).get("usd") or 0) < self.rules.min_liq / 4
@@ -580,26 +591,40 @@ class Sim:
                 del self.watch[token]
                 self.count("descartados_sin_liquidez")
         for token, pair in pairs.items():
+            retry = token in self.waiting  # ya pasó los filtros antes; una mesa espera su edad mínima
+            desks = [d for d in self.desks if d.name in self.waiting.get(token, ())] if retry else self.desks
+            count = (lambda key: [d.count(key) for d in desks]) if retry else self.count
             reason = screen(pair, now, self.rules)
             if reason == "liquidez" or reason == "precio":
-                continue  # puede crecer: se vuelve a mirar en la siguiente vuelta
+                if retry:  # mientras esperaba se fue la liquidez: se descarta
+                    del self.waiting[token]
+                    count(f"rechazo_{reason}")
+                continue  # si no, puede crecer: se vuelve a mirar en la siguiente vuelta
             if reason:
                 self.checked[token] = now
-                self.count(f"rechazo_{reason}")
+                self.waiting.pop(token, None)
+                count(f"rechazo_{reason}")
                 continue
             try:
-                reason = self.holders_ok(pair)
+                reason = self.holders_ok(pair)  # al reintentar se revisa de nuevo: los holders cambian
             except Exception as exc:
                 log.warning("RPC %s: %s", token, exc)
                 continue
             self.checked[token] = now
             if reason:
-                self.count(f"rechazo_{reason}")
+                self.waiting.pop(token, None)
+                count(f"rechazo_{reason}")
                 continue
             copy = self.is_copy(pair)
             pair = self.with_jup_price({token: pair})[token]
-            for desk in self.desks:
-                desk.try_buy(pair, now, self.token_decimals, copy)
+            still = set()
+            for desk in desks:
+                if desk.try_buy(pair, now, self.token_decimals, copy) == "wait":
+                    still.add(desk.name)
+            if still:
+                self.waiting[token] = still
+            else:
+                self.waiting.pop(token, None)
 
     def manage(self) -> None:
         held = self.held()
