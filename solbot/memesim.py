@@ -81,6 +81,7 @@ class Rules:
     skip_copycats: bool = False  # no comprar si otra moneda más antigua ya usa el mismo nombre
     min_age_min: float = 0.0  # esperar a que la moneda tenga esta edad (minutos) antes de comprar
     min_buy_ratio: float = 0.0  # momentum: compras/ventas de los últimos 5 min (0 = sin filtro)
+    only_pump: bool = False  # solo monedas lanzadas en pump.fun (mint termina en "pump")
 
 
 # ---- reglas puras ---------------------------------------------------------------------------
@@ -319,6 +320,9 @@ class Desk:
         if self.rules.skip_copycats and is_copy:
             self.count("rechazo_copia")
             return None
+        if self.rules.only_pump and not token.endswith("pump"):
+            self.count("rechazo_no_pump")
+            return None
         age_min = (now - pair["pairCreatedAt"] / 1000) / 60
         if age_min < self.rules.min_age_min:
             return "wait"
@@ -420,6 +424,11 @@ VARIANTS = {
     "momentum": Rules(**_QUICK, min_buy_ratio=1.5, targets=((1.5, 0.5),), trail=0.25, stop=-0.20, rug_liq_drop=0.8),
     "pocas_grandes": Rules(**_QUICK, size_frac=0.15, max_open=4, targets=((1.5, 1.0),), stop=-0.20, rug_liq_drop=0.8),
     "loteria_3x": Rules(**_QUICK, targets=((3.0, 0.5),), trail=0.40, stop=-0.50, max_hold_h=12.0),
+    # 2026-11-07 10:15: de 98 operaciones cerradas, las monedas de pump.fun (mint "...pump") sufrieron
+    # rug 1 de 16 veces; las demás 59 de 82.
+    "solo_pump": Rules(**_QUICK, only_pump=True, min_age_min=5.0, targets=((1.5, 0.5),), trail=0.25, stop=-0.20,
+                       rug_liq_drop=0.8, max_hold_h=6.0, size_frac=0.06, max_open=8),
+    "solo_pump_1_5x": Rules(**_QUICK, only_pump=True, targets=((1.5, 1.0),), stop=-0.20, rug_liq_drop=0.8, max_hold_h=3.0),
 }
 
 

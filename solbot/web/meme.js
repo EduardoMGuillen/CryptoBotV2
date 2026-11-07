@@ -48,6 +48,7 @@
     principal: "Principal", sin_copias: "Sin copias", sin_copias_30m: "Sin copias, 30 min",
     todo_1_2x: "Vende todo a 1.2x", todo_1_5x: "Vende todo a 1.5x", mitad_1_3x: "Mitad a 1.3x",
     alerta_rug: "Alerta de rug", momentum: "Momentum", pocas_grandes: "Pocas y grandes", loteria_3x: "Lotería 3x",
+    solo_pump: "Solo pump.fun", solo_pump_1_5x: "Solo pump.fun, todo a 1.5x",
   };
   const VARIANT_HELP = {
     principal: "Sin copias, espera 5 min, vende la mitad a 1.5x y el resto con trailing de 25 %. Stop −20 %, sale si la liquidez cae 20 %.",
@@ -60,6 +61,8 @@
     momentum: "Solo compra si en 5 min hubo al menos 1.5 compras por cada venta.",
     pocas_grandes: "Máximo 4 posiciones de 15 % cada una; vende todo a 1.5x.",
     loteria_3x: "Espera 3x para vender la mitad; stop −50 %, trailing 40 %.",
+    solo_pump: "Como Principal, pero solo monedas lanzadas en pump.fun (las que menos rugs tuvieron).",
+    solo_pump_1_5x: "Solo monedas de pump.fun; vende todo a 1.5x, stop −20 %.",
   };
   const ROOT = "principal";
   let variant = (location.hash.match(/v=([a-z0-9_]+)/) || [])[1] || ROOT;

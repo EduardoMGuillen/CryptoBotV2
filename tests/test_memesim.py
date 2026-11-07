@@ -462,3 +462,15 @@ def test_full_exit_at_single_target():
     assert step_position(p, 0.0016, 30_000, NOW + 60, rules) == [(1.0, "tp1")]
     book.sell(p, p.qty, 6.0, 0.05, NOW + 60, "tp1")
     assert book.positions == {} and book.closed[0]["reason"] == "tp1"
+
+
+def test_only_pump_filter(tmp_path):
+    from solbot.memesim import Desk
+
+    rules = Rules(only_pump=True)
+    desk = Desk("p", tmp_path, rules, TxSim(lambda *a: {"outAmount": "1", "outUsdValue": 1.0}, lambda: 100.0, rules,
+                                             rng=lambda: 0.99, sleep=lambda s: None))
+    desk.try_buy(pair(), NOW, lambda t: 6, is_copy=False)
+    assert desk.funnel["rechazo_no_pump"] == 1 and desk.book.positions == {}
+    desk.try_buy(pair(baseToken={"address": "AbCpump", "symbol": "P"}), NOW, lambda t: 6, is_copy=False)
+    assert "AbCpump" in desk.book.positions
