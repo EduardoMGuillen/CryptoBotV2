@@ -474,3 +474,28 @@ def test_only_pump_filter(tmp_path):
     assert desk.funnel["rechazo_no_pump"] == 1 and desk.book.positions == {}
     desk.try_buy(pair(baseToken={"address": "AbCpump", "symbol": "P"}), NOW, lambda t: 6, is_copy=False)
     assert "AbCpump" in desk.book.positions
+
+
+def test_desk_age_and_liquidity_limits(tmp_path):
+    from solbot.memesim import Desk
+
+    rules = Rules(max_age_h=24.0, min_liq=50_000.0)
+    desk = Desk("s", tmp_path, rules, TxSim(lambda *a: {"outAmount": "1", "outUsdValue": 1.0}, lambda: 100.0, rules,
+                                             rng=lambda: 0.99, sleep=lambda s: None))
+    desk.try_buy(pair(), NOW, lambda t: 6, is_copy=False)  # 30 000 de liquidez: poca para esta mesa
+    assert desk.funnel["rechazo_liquidez"] == 1 and desk.book.positions == {}
+    old = pair(pairCreatedAt=(NOW - 25 * 3600) * 1000, liquidity={"usd": 80_000, "base": 1, "quote": 1})
+    desk.try_buy(old, NOW, lambda t: 6, is_copy=False)
+    assert desk.funnel["rechazo_edad"] == 1 and desk.book.positions == {}
+    ok = pair(pairCreatedAt=(NOW - 10 * 3600) * 1000, liquidity={"usd": 80_000, "base": 1, "quote": 1})
+    desk.try_buy(ok, NOW, lambda t: 6, is_copy=False)
+    assert "MINT" in desk.book.positions
+
+
+def test_default_desk_still_rejects_pairs_older_than_six_hours(tmp_path):
+    from solbot.memesim import Desk
+
+    desk = Desk("d", tmp_path, RULES, TxSim(lambda *a: {"outAmount": "1", "outUsdValue": 1.0}, lambda: 100.0, RULES,
+                                            rng=lambda: 0.99, sleep=lambda s: None))
+    desk.try_buy(pair(pairCreatedAt=(NOW - 7 * 3600) * 1000), NOW, lambda t: 6, is_copy=False)
+    assert desk.funnel["rechazo_edad"] == 1 and desk.book.positions == {}

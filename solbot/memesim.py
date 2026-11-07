@@ -257,6 +257,7 @@ class Book:
 
 # ---- simulador en vivo ----------------------------------------------------------------------
 
+WATCH_H = 6.0
 VARIANT_RE = re.compile(r"^[a-z0-9_]{1,32}$")
 
 
@@ -327,8 +328,14 @@ class Desk:
             self.count("rechazo_no_pump")
             return None
         age_min = (now - pair["pairCreatedAt"] / 1000) / 60
+        if age_min > self.rules.max_age_h * 60:  # el escáner deja pasar hasta la mesa más permisiva
+            self.count("rechazo_edad")
+            return None
         if age_min < self.rules.min_age_min:
             return "wait"
+        if float((pair.get("liquidity") or {}).get("usd") or 0) < self.rules.min_liq:  # se mide cuando ya tiene la edad pedida
+            self.count("rechazo_liquidez")
+            return None
         if self.rules.min_buy_ratio:
             m5 = (pair.get("txns") or {}).get("m5") or {}
             if (m5.get("buys") or 0) < self.rules.min_buy_ratio * max(1, m5.get("sells") or 0):
@@ -413,10 +420,14 @@ class Desk:
 ROOT_VARIANT = "principal"
 _QUICK = dict(skip_copycats=True)
 VARIANTS = {
-    # Mi estrategia: el 53 % de las monedas tocó 1.5x pero la mayoría terminó en rug (mediana del pico
-    # de los rugs: x1.76). Se asegura la mitad en 1.5x, el resto con trailing; sale antes ante rugs.
-    "principal": Rules(skip_copycats=True, min_age_min=5.0, targets=((1.5, 0.5),), trail=0.25, stop=-0.20,
-                       rug_liq_drop=0.8, max_hold_h=6.0, size_frac=0.06, max_open=8),
+    # v2 (2026-11-07 16:45, reinicio a $100 por pedido del usuario; la v1 quedó en
+    # data/meme/archive/principal_v1_fallida con −82 % en 53 operaciones).
+    # "Sobrevivientes": de 442 operaciones, las monedas con <15 min de vida sufrieron rug el 65 %
+    # de las veces; las de ≥2 h, 1 de 50 (muestra chica: ~8 monedas distintas). Solo compra monedas
+    # con 2–24 h de vida y liquidez ≥ 30 000, toma ganancias pronto y corta pérdidas cortas.
+    "principal": Rules(skip_copycats=True, min_age_min=120.0, max_age_h=24.0, min_liq=30_000.0,
+                       targets=((1.3, 0.5),), trail=0.20, stop=-0.15, rug_liq_drop=0.8, max_hold_h=6.0,
+                       size_frac=0.05, max_open=8),
     "sin_copias_30m": Rules(skip_copycats=True, min_age_min=30.0),
     # 11:55: retiradas por fallidas con ≥30 cerradas (datos en data/meme/archive/): sin_copias (−55 %),
     # todo_1_2x (−31 %), todo_1_5x (−30 %), alerta_rug (−51 %), mitad_1_3x (−53 %), loteria_3x (−63 %),
@@ -431,7 +442,13 @@ VARIANTS = {
                            rug_liq_drop=0.8, max_hold_h=6.0, size_frac=0.06, max_open=8),
     "solo_pump_momentum": Rules(**_QUICK, only_pump=True, min_buy_ratio=1.5, targets=((1.5, 1.0),), stop=-0.20,
                                 rug_liq_drop=0.8, max_hold_h=3.0),
+    # 16:45: sobrevivientes con más liquidez (≥ 60 000) y compradores dominando los últimos 5 min.
+    "sobrevivientes_momentum": Rules(skip_copycats=True, min_age_min=120.0, max_age_h=24.0, min_liq=60_000.0,
+                                     min_buy_ratio=1.2, targets=((1.5, 1.0),), stop=-0.15, rug_liq_drop=0.8,
+                                     max_hold_h=6.0, size_frac=0.05, max_open=8),
 }
+SCAN_RULES = Rules(max_age_h=max(r.max_age_h for r in VARIANTS.values()),
+                   min_liq=min(r.min_liq for r in VARIANTS.values()))
 
 
 class Sim:
@@ -565,8 +582,9 @@ class Sim:
                 self.watch[token] = now
                 self.count("vistos")
             time.sleep(2.5)  # GeckoTerminal: 30 llamadas/min
-        # Fuera de la ventana de 6 h ya no pueden pasar el filtro de edad.
-        limit = now - self.rules.max_age_h * 3600
+        # Se vigila cada moneda hasta WATCH_H horas después de descubrirla (las de tendencia
+        # pueden llegar ya viejas: su edad la filtra cada mesa).
+        limit = now - WATCH_H * 3600
         self.watch = {t: s for t, s in self.watch.items() if s > limit}
         self.checked = {t: s for t, s in self.checked.items() if s > limit}
         self.waiting = {t: names for t, names in self.waiting.items() if t in self.watch}
@@ -901,7 +919,7 @@ def main() -> None:
         print(status(folder))
         return
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
-    Sim(folder, Rules(), resolve_url(dict(os.environ), args.env_file), variants=VARIANTS).run()
+    Sim(folder, SCAN_RULES, resolve_url(dict(os.environ), args.env_file), variants=VARIANTS).run()
 
 
 if __name__ == "__main__":
