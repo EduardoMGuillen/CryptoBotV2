@@ -153,6 +153,7 @@ a { color: inherit; }
 .up { color: var(--gain); }
 .down { color: var(--loss); }
 .buy { color: var(--sol); }
+.warn { color: var(--warn); }
 
 /* curva */
 .panel--curve { margin-bottom: 20px; }

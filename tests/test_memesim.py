@@ -1,6 +1,7 @@
 import pytest
 
-from solbot.memesim import Book, Position, Rules, concentration, fill_price, screen, step_position
+from solbot.jupiter import JupiterError
+from solbot.memesim import Book, Fill, Position, Rules, TxSim, concentration, screen, step_position
 
 NOW = 1_800_000_000.0  # segundos
 RULES = Rules()
@@ -57,21 +58,63 @@ def test_concentration_merges_accounts_of_same_owner():
     assert biggest == pytest.approx(0.06)
 
 
-# ---- costo de ejecución ---------------------------------------------------------------------
+# ---- transacción simulada ------------------------------------------------------------------
 
-def test_fill_price_buy_pays_fee_and_impact():
-    # 1 000 USD contra 10 000 USD del lado cotizado: impacto 10 %, comisión 1 %
-    p = fill_price(1.0, 1000.0, quote_liq_usd=10_000.0, side="buy", fee=0.01)
-    assert p == pytest.approx(1.10 / 0.99)
+def quote_ok(out_amount=1_000_000, out_usd=4.0):
+    calls = []
+
+    def quote(i, o, amount):
+        calls.append((i, o, amount))
+        return {"outAmount": str(out_amount), "outUsdValue": out_usd}
+
+    return quote, calls
 
 
-def test_fill_price_sell_receives_less():
-    p = fill_price(1.0, 1000.0, quote_liq_usd=10_000.0, side="sell", fee=0.01)
-    assert p == pytest.approx(0.99 / 1.10)
+def txsim(quote, rng=0.99, sol=100.0, **rules):
+    return TxSim(quote, lambda: sol, Rules(**rules), rng=lambda: rng, sleep=lambda s: None)
 
 
-def test_fill_price_sell_into_empty_pool_is_zero():
-    assert fill_price(1.0, 100.0, quote_liq_usd=0.0, side="sell", fee=0.01) == 0.0
+def test_buy_quotes_exact_lamports_and_charges_platform_fee():
+    quote, calls = quote_ok(out_amount=5_000_000, out_usd=3.96)
+    fill = txsim(quote).buy("MINT", 4.0)
+    assert calls == [("So11111111111111111111111111111111111111112", "MINT", 40_000_000)]
+    assert fill.ok and fill.raw == 5_000_000
+    assert fill.usd == pytest.approx(3.96 * 0.99)
+    assert fill.fee_usd == pytest.approx(0.0006 * 100)
+
+
+def test_failed_tx_still_pays_network_fee_and_does_not_quote():
+    quote, calls = quote_ok()
+    fill = txsim(quote, rng=0.01).sell("MINT", 123)
+    assert not fill.ok and fill.note == "fallo"
+    assert fill.fee_usd == pytest.approx(0.06)
+    assert calls == []
+
+
+def test_sell_net_of_network_fee():
+    quote, _ = quote_ok(out_usd=2.0)
+    fill = txsim(quote).sell("MINT", 10)
+    assert fill.usd == pytest.approx(2.0 * 0.99 - 0.06)
+
+
+def test_no_route_when_jupiter_rejects():
+    def quote(i, o, a):
+        raise JupiterError("Jupiter rechazó la cotización (HTTP 400): no route")
+
+    fill = txsim(quote).sell("MINT", 10)
+    assert not fill.ok and fill.note == "sin_ruta"
+
+
+def test_api_error_is_not_no_route():
+    def quote(i, o, a):
+        raise JupiterError("Jupiter no respondió a la cotización tras 3 intentos (HTTP 429).")
+
+    assert txsim(quote).sell("MINT", 10).note == "error"
+
+
+def test_empty_output_is_no_route():
+    quote, _ = quote_ok(out_amount=0)
+    assert txsim(quote).sell("MINT", 10).note == "sin_ruta"
 
 
 # ---- salidas --------------------------------------------------------------------------------
@@ -114,21 +157,32 @@ def test_time_limit():
 
 # ---- libro ----------------------------------------------------------------------------------
 
-def test_book_open_and_close_round_trip():
+def test_book_open_partial_and_close():
     book = Book(cash=100.0)
-    p = book.open(pair(), NOW, RULES)  # 4 USD de entrada
-    assert book.cash == pytest.approx(96.0)
-    assert p.cost == pytest.approx(4.0)
-    proceeds = book.sell(p, 1.0, float(pair()["priceUsd"]), 30_000.0, NOW + 60, "stop", RULES)
-    assert proceeds < 4.0  # paga comisión y penalización de entrada/salida
+    p = book.open(pair(), NOW, 4.0, Fill(ok=True, usd=3.9, raw=4_000_000, fee_usd=0.05), decimals=6)
+    assert book.cash == pytest.approx(95.95)
+    assert p.qty == pytest.approx(4.0) and p.cost == pytest.approx(4.05)
+    book.sell(p, 4.0 / 3, 3.0, 0.05, NOW + 60, "tp1")
+    assert p.steps_done == 1 and "MINT" in book.positions
+    book.pay_fee(p, 0.05)  # venta fallida
+    book.sell(p, p.qty, 2.0, 0.05, NOW + 120, "trailing")
     assert book.positions == {}
-    assert len(book.closed) == 1
+    closed = book.closed[0]
+    assert closed["pnl"] == pytest.approx(3.0 + 2.0 - 0.05 - 4.05)
+    assert book.cash == pytest.approx(100 - 4.05 + 3.0 - 0.05 + 2.0)
+
+
+def test_stop_sell_closes_even_if_quantity_remains():
+    book = Book(cash=100.0)
+    p = book.open(pair(), NOW, 4.0, Fill(ok=True, usd=3.9, raw=4_000_000, fee_usd=0.0), decimals=6)
+    book.sell(p, p.qty, 1.0, 0.0, NOW + 60, "stop")
+    assert book.positions == {} and book.closed[0]["reason"] == "stop"
 
 
 def test_book_respects_max_open():
     book = Book(cash=100.0)
     for i in range(RULES.max_open):
-        book.open(pair(baseToken={"address": f"M{i}", "symbol": "X"}), NOW, RULES)
+        book.open(pair(baseToken={"address": f"M{i}", "symbol": "X"}), NOW, 4.0, Fill(ok=True, raw=1), decimals=0)
     assert not book.can_open(RULES)
 
 
@@ -184,3 +238,35 @@ def test_trade_detail_reads_closed_trade_and_downsamples(tmp_path):
     assert d["status"] == "closed" and d["trade"]["reason"] == "trailing"
     assert len(d["path"]) == 100 and d["path"][-1]["t"] == 999
     assert len(d["events"]) == 1
+
+
+def test_sim_sell_retries_then_gives_up_without_route(tmp_path):
+    from solbot.memesim import Sim
+
+    sim = Sim(tmp_path, RULES, rpc_url="http://unused")
+    p = sim.book.open(pair(), NOW, 4.0, Fill(ok=True, usd=3.9, raw=4_000_000, fee_usd=0.0), decimals=6)
+    outcomes = iter([Fill(ok=False, fee_usd=0.06, note="fallo")] + [Fill(ok=False, note="sin_ruta")] * 3)
+    sim.tx.sell = lambda mint, raw: next(outcomes)
+    sim.execute_sell(p, 1.0, "stop", 0.0007, NOW + 5)  # falla: paga red, sigue abierta
+    assert "MINT" in sim.book.positions and p.fees == pytest.approx(0.06)
+    for i in range(3):
+        sim.execute_sell(p, 1.0, "liquidez", 0.0001, NOW + 10 + i)
+    assert sim.book.positions == {}
+    assert sim.book.closed[0]["reason"] == "sin_ruta"
+    assert sim.book.closed[0]["pnl"] == pytest.approx(-4.06)
+    assert sim.funnel["tx_fallidas"] == 1 and sim.funnel["tx_sin_ruta"] == 3
+
+
+def test_sim_sell_records_real_multiple(tmp_path):
+    import json
+
+    from solbot.memesim import Sim
+
+    sim = Sim(tmp_path, RULES, rpc_url="http://unused")
+    # 4 USD a 0.001 USD por token = 4 000 tokens
+    p = sim.book.open(pair(), NOW, 4.0, Fill(ok=True, usd=3.9, raw=4_000_000_000, fee_usd=0.0), decimals=6)
+    sim.tx.sell = lambda mint, raw: Fill(ok=True, usd=1.0, fee_usd=0.06)
+    sim.execute_sell(p, 1.0, "stop", 0.00074, NOW + 5)  # pantalla x0.74, pero solo llega 1 USD
+    event = json.loads((tmp_path / "events.jsonl").read_text().splitlines()[-1])
+    assert event["mult"] == pytest.approx(0.74)
+    assert event["real_mult"] == pytest.approx(0.25)

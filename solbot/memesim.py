@@ -8,9 +8,14 @@ Copia las reglas del post "$100 → $4,812" para medir si funcionan con precios 
     resto con trailing de 30 % desde el máximo; sale si la liquidez cae a la mitad o tras 24 h.
 No se simula la regla "dev mueve tokens a un exchange" (requiere rastrear la billetera del dev).
 
-Costos simulados (conservadores, a propósito): 1 % de comisión por lado + impacto de precio
-de un pool de producto constante + 2 % de retraso en la entrada. Los stops se ejecutan al
-precio que se observa en la siguiente consulta, así que pueden salir mucho peor que −25 %.
+Cada compra y venta se simula como una transacción real (`TxSim`):
+  - se espera un retraso (lo que tarda en firmarse y llegar al bloque) y se cotiza en ese
+    momento con Jupiter, por el monto exacto: precio, impacto y comisión del pool son reales;
+  - 15 % de las transacciones fallan (congestión, slippage); igual se paga la comisión de red
+    y la venta se reintenta en la siguiente revisión, con el precio que haya entonces;
+  - comisión de red + prioridad por intento y 1 % de la plataforma del bot;
+  - si Jupiter no encuentra ruta (sacaron la liquidez), tras 3 intentos se da por perdida.
+Los precios se revisan cada 5 s. Un stop de −25 % puede ejecutarse mucho peor: eso es real.
 
 Fuentes: GeckoTerminal (pools nuevos y en tendencia), DexScreener (precio y liquidez),
 RPC de Solana (holders y autoridades del mint).
@@ -21,6 +26,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import random
 import re
 import time
 from dataclasses import asdict, dataclass, field
@@ -28,6 +34,8 @@ from pathlib import Path
 
 import requests
 
+from .jupiter import SOL_MINT, Jupiter, JupiterError
+from .market import last_price
 from .rpc import resolve_url
 
 log = logging.getLogger("memesim")
@@ -59,8 +67,11 @@ class Rules:
     trail: float = 0.30
     max_hold_h: float = 24.0
     rug_liq_drop: float = 0.5
-    fee: float = 0.01
-    latency: float = 0.02
+    fee: float = 0.01  # plataforma del bot (fomo, axiom, photon… cobran ~1 %)
+    network_fee_sol: float = 0.0006  # base + prioridad/propina por transacción, se cobre o falle
+    fail_rate: float = 0.15
+    latency_s: float = 1.5
+    max_no_route: int = 3
     max_open: int = 10
 
 
@@ -97,12 +108,49 @@ def concentration(accounts: list[dict], supply: float, pool: str, pool_base: flo
     return sum(top) / supply, top[0] / supply
 
 
-def fill_price(price: float, usd: float, quote_liq_usd: float, side: str, fee: float) -> float:
-    """Precio medio efectivo en un pool x·y=k con `quote_liq_usd` del lado cotizado."""
-    if quote_liq_usd <= 0:
-        return float("inf") if side == "buy" else 0.0
-    impact = 1 + usd / quote_liq_usd
-    return price * impact / (1 - fee) if side == "buy" else price * (1 - fee) / impact
+@dataclass
+class Fill:
+    ok: bool
+    usd: float = 0.0  # compra: USD de tokens recibidos; venta: USD recibidos (netos)
+    raw: int = 0  # unidades mínimas del token recibidas (compra)
+    fee_usd: float = 0.0  # comisión de red pagada (también si falla)
+    note: str = ""  # "fallo" | "sin_ruta" | "error"
+
+
+class TxSim:
+    """Transacción en papel: cotización real de Jupiter tras un retraso, con fallos y comisiones."""
+
+    def __init__(self, quote, sol_price, rules: Rules, rng=random.random, sleep=time.sleep):
+        self.quote, self.sol_price, self.rules, self.rng, self.sleep = quote, sol_price, rules, rng, sleep
+
+    def _net_fee(self) -> float:
+        return self.rules.network_fee_sol * self.sol_price()
+
+    def _swap(self, input_mint: str, output_mint: str, amount: int) -> Fill:
+        self.sleep(self.rules.latency_s)  # lo que tarda en llegar al bloque: el precio sigue moviéndose
+        fee = self._net_fee()
+        if self.rng() < self.rules.fail_rate:
+            return Fill(ok=False, fee_usd=fee, note="fallo")
+        try:
+            order = self.quote(input_mint, output_mint, amount)
+        except JupiterError as exc:
+            # 4xx: no hay ruta (pool vacío o token muerto). Otro error: no se sabe, se reintenta.
+            return Fill(ok=False, fee_usd=0.0, note="sin_ruta" if "rechazó" in str(exc) else "error")
+        out = int(order.get("outAmount") or 0)
+        if out <= 0 or order.get("outUsdValue") is None:
+            return Fill(ok=False, fee_usd=0.0, note="sin_ruta")
+        usd = float(order["outUsdValue"]) * (1 - self.rules.fee)
+        return Fill(ok=True, usd=usd, raw=out, fee_usd=fee)
+
+    def buy(self, mint: str, usd: float) -> Fill:
+        lamports = int(usd / self.sol_price() * 1e9)
+        return self._swap(SOL_MINT, mint, lamports)
+
+    def sell(self, mint: str, raw: int) -> Fill:
+        fill = self._swap(mint, SOL_MINT, raw)
+        if fill.ok:
+            fill.usd = max(0.0, fill.usd - fill.fee_usd)
+        return fill
 
 
 @dataclass
@@ -119,6 +167,9 @@ class Position:
     steps_done: int = 0
     proceeds: float = 0.0
     last: float = 0.0
+    decimals: int = -1  # -1: desconocido (se consulta al RPC)
+    no_route: int = 0
+    fees: float = 0.0
 
 
 def step_position(p: Position, price: float, liq: float, now: float, rules: Rules) -> list[tuple[float, str]]:
@@ -152,31 +203,38 @@ class Book:
     def can_open(self, rules: Rules) -> bool:
         return len(self.positions) < rules.max_open
 
-    def open(self, pair: dict, now: float, rules: Rules) -> Position:
+    def open(self, pair: dict, now: float, usd: float, fill: Fill, decimals: int) -> Position:
+        """Abre con lo que de verdad llegó: `fill.raw` tokens por `usd` + comisión de red."""
         price = float(pair["priceUsd"])
-        liq = float(pair["liquidity"]["usd"])
-        usd = min(self.equity() * rules.size_frac, self.cash)
-        paid = fill_price(price, usd, liq / 2, "buy", rules.fee) * (1 + rules.latency)
         token = pair["baseToken"]["address"]
         p = Position(token=token, symbol=pair["baseToken"].get("symbol", "?"), pool=pair["pairAddress"],
-                     entry=price, qty=usd / paid, cost=usd, opened=now, peak=price, entry_liq=liq, last=price)
-        self.cash -= usd
+                     entry=price, qty=fill.raw / 10 ** decimals, cost=usd + fill.fee_usd, opened=now, peak=price,
+                     entry_liq=float(pair["liquidity"]["usd"]), last=price, decimals=decimals, fees=fill.fee_usd)
+        self.cash -= usd + fill.fee_usd
         self.positions[token] = p
         return p
 
-    def sell(self, p: Position, frac: float, price: float, liq: float, now: float, reason: str, rules: Rules) -> float:
-        qty = p.qty if frac >= 1.0 else p.qty * frac
-        got = qty * fill_price(price, qty * price, liq / 2, "sell", rules.fee)
+    def pay_fee(self, p: Position | None, fee: float) -> None:
+        """Transacción fallida: se paga la red igual."""
+        self.cash -= fee
+        if p is not None:
+            p.proceeds -= fee
+            p.fees += fee
+
+    def sell(self, p: Position, qty: float, got: float, fee: float, now: float, reason: str) -> None:
         self.cash += got
         p.qty -= qty
         p.proceeds += got
+        p.fees += fee
         if reason.startswith("tp"):
             p.steps_done += 1
-        if frac >= 1.0 or p.qty <= 0:
-            del self.positions[p.token]
-            self.closed.append({**asdict(p), "closed": now, "reason": reason, "pnl": p.proceeds - p.cost,
-                                "mult": p.proceeds / p.cost if p.cost else 0.0})
-        return got
+        if p.qty <= 0 or not reason.startswith("tp"):
+            self.close(p, now, reason)
+
+    def close(self, p: Position, now: float, reason: str) -> None:
+        del self.positions[p.token]
+        self.closed.append({**asdict(p), "closed": now, "reason": reason, "pnl": p.proceeds - p.cost,
+                            "mult": p.proceeds / p.cost if p.cost else 0.0})
 
 
 # ---- simulador en vivo ----------------------------------------------------------------------
@@ -192,6 +250,10 @@ class Sim:
         self.checked: dict[str, float] = {}  # token -> cuándo se revisaron holders (rechazado)
         self.funnel: dict[str, int] = {"vistos": 0}
         self.book = Book(cash=start_cash, start=time.time())
+        self.decimals: dict[str, int] = {}
+        self._sol = (0.0, 0.0)  # (precio, cuándo)
+        self.jupiter = Jupiter(session=self.http)
+        self.tx = TxSim(self.jupiter.order, self.sol_price, rules)
         self._load()
 
     # -- persistencia
@@ -243,6 +305,23 @@ class Sim:
             r.raise_for_status()
             return r.json()
         r.raise_for_status()
+
+    def sol_price(self) -> float:
+        price, at = self._sol
+        if time.time() - at > 60:
+            try:
+                price = last_price("SOLUSDT", session=self.http)
+                self._sol = (price, time.time())
+            except Exception as exc:
+                log.warning("precio de SOL: %s", exc)
+                if not price:
+                    raise
+        return price
+
+    def token_decimals(self, token: str) -> int:
+        if token not in self.decimals:
+            self.decimals[token] = int(self._rpc("getTokenSupply", [token])["value"]["decimals"])
+        return self.decimals[token]
 
     def _rpc(self, method: str, params: list):
         r = self.http.post(self.rpc_url, json={"jsonrpc": "2.0", "id": 1, "method": method, "params": params}, timeout=20)
@@ -301,7 +380,9 @@ class Sim:
             return "mint_authority"
         if info.get("freezeAuthority"):
             return "freeze_authority"
-        supply = float(self._rpc("getTokenSupply", [token])["value"]["uiAmount"] or 0)
+        supply_info = self._rpc("getTokenSupply", [token])["value"]
+        supply = float(supply_info["uiAmount"] or 0)
+        self.decimals[token] = int(supply_info["decimals"])
         largest = self._rpc("getTokenLargestAccounts", [token])["value"][:20]
         owners = self._rpc("getMultipleAccounts", [[a["address"] for a in largest], {"encoding": "jsonParsed"}])["value"]
         accounts = []
@@ -346,12 +427,24 @@ class Sim:
             if not self.book.can_open(self.rules):
                 self.count("sin_cupo")
                 continue
-            p = self.book.open(pair, now, self.rules)
+            usd = min(self.book.equity() * self.rules.size_frac, self.book.cash)
+            symbol = pair["baseToken"].get("symbol", "?")
+            fill = self.tx.buy(token, usd)
+            self.count("tx_intentos")
+            if not fill.ok:
+                self.book.pay_fee(None, fill.fee_usd)
+                self.count("tx_fallidas" if fill.note == "fallo" else f"tx_{fill.note}")
+                self.count("compra_fallida")
+                self.event(kind="fail", side="buy", token=token, symbol=symbol, note=fill.note, fee=fill.fee_usd)
+                log.info("COMPRA FALLIDA %s (%s)", symbol, fill.note)
+                continue
+            self.count("tx_ok")
+            p = self.book.open(pair, now, usd, fill, self.token_decimals(token))
             self.record_price(token, now, p.entry, p.entry_liq)
             self.count("compras")
-            self.event(kind="buy", token=token, symbol=p.symbol, price=p.entry, usd=p.cost,
-                       liq=p.entry_liq, age_min=(now - pair["pairCreatedAt"] / 1000) / 60)
-            log.info("COMPRA %s %.2f USD a %.8g (liq %.0f)", p.symbol, p.cost, p.entry, p.entry_liq)
+            self.event(kind="buy", token=token, symbol=p.symbol, price=p.entry, usd=usd, got_usd=fill.usd,
+                       fee=fill.fee_usd, liq=p.entry_liq, age_min=(now - pair["pairCreatedAt"] / 1000) / 60)
+            log.info("COMPRA %s %.2f USD (recibe %.2f en tokens) a %.8g (liq %.0f)", p.symbol, usd, fill.usd, p.entry, p.entry_liq)
 
     def manage(self) -> None:
         if not self.book.positions:
@@ -367,11 +460,37 @@ class Sim:
             p.last = price
             self.record_price(token, now, price, liq)
             for frac, reason in step_position(p, price, liq, now, self.rules):
-                got = self.book.sell(p, frac, price, liq, now, reason, self.rules)
-                self.event(kind="sell", token=token, symbol=p.symbol, price=price, frac=frac, usd=got,
-                           reason=reason, mult=price / p.entry)
-                log.info("VENDE %s %.0f%% (%s) a %.8g → %.2f USD", p.symbol, frac * 100, reason, price, got)
+                self.execute_sell(p, frac, reason, price, now)
             p.peak = max(p.peak, price)
+
+    def execute_sell(self, p: Position, frac: float, reason: str, price: float, now: float) -> None:
+        if p.decimals < 0:
+            p.decimals = self.token_decimals(p.token)
+        qty = p.qty if frac >= 1.0 else p.qty * frac
+        raw = int(qty * 10 ** p.decimals)
+        fill = self.tx.sell(p.token, raw)
+        self.count("tx_intentos")
+        if not fill.ok:
+            self.book.pay_fee(p, fill.fee_usd)
+            self.count("tx_fallidas" if fill.note == "fallo" else f"tx_{fill.note}")
+            self.event(kind="fail", side="sell", token=p.token, symbol=p.symbol, note=fill.note, reason=reason,
+                       fee=fill.fee_usd, mult=price / p.entry)
+            log.info("VENTA FALLIDA %s (%s, %s): se reintenta", p.symbol, reason, fill.note)
+            if fill.note == "sin_ruta":
+                p.no_route += 1
+                if p.no_route >= self.rules.max_no_route:  # nadie te compra: se pierde lo que queda
+                    self.book.close(p, now, "sin_ruta")
+                    self.event(kind="sell", token=p.token, symbol=p.symbol, price=price, frac=1.0, usd=0.0,
+                               reason="sin_ruta", mult=0.0)
+            return
+        self.count("tx_ok")
+        self.book.sell(p, qty, fill.usd, fill.fee_usd, now, reason)
+        # mult: lo que de verdad se obtuvo por token frente a la entrada (incluye impacto y comisiones)
+        real_mult = (fill.usd / qty) / p.entry if qty else 0.0
+        self.event(kind="sell", token=p.token, symbol=p.symbol, price=price, frac=frac, usd=fill.usd,
+                   fee=fill.fee_usd, reason=reason, mult=price / p.entry, real_mult=real_mult)
+        log.info("VENDE %s %.0f%% (%s): pantalla x%.2f, ejecutado x%.2f → %.2f USD",
+                 p.symbol, frac * 100, reason, price / p.entry, real_mult, fill.usd)
 
     def run(self) -> None:
         log.info("memesim en papel: libro %.2f USD", self.book.equity())
@@ -389,7 +508,7 @@ class Sim:
                 self.save()
             except Exception as exc:
                 log.exception("vuelta fallida: %s", exc)
-            time.sleep(15)
+            time.sleep(5)
 
 
 def _tail_jsonl(path: Path, limit: int) -> list[dict]:
@@ -449,6 +568,8 @@ def snapshot(folder: Path, start_cash: float = 100.0) -> dict:
         "closed": [{k: c[k] for k in ("symbol", "token", "reason", "pnl", "mult", "cost", "opened", "closed")}
                    for c in reversed(closed[-100:])],
         "events": list(reversed(_tail_jsonl(folder / "events.jsonl", 60))),
+        "tx": {k[3:]: v for k, v in funnel.items() if k.startswith("tx_")},
+        "network_fees": sum(c.get("fees", 0.0) for c in closed) + sum(p.get("fees", 0.0) for p in s["positions"].values()),
         "curve": curve,
     }
 
@@ -471,7 +592,7 @@ def trade_detail(folder: Path, token: str, max_points: int = 600) -> dict:
         path = [path[int(i * step)] for i in range(max_points - 1)] + [path[-1]]
     events = [e for e in _tail_jsonl(folder / "events.jsonl", 20_000) if e.get("token") == token]
     keep = ("symbol", "token", "pool", "entry", "qty", "cost", "opened", "peak", "entry_liq", "steps_done",
-            "proceeds", "last", "closed", "reason", "pnl", "mult")
+            "proceeds", "last", "closed", "reason", "pnl", "mult", "fees")
     return {"status": status_, "trade": {k: record[k] for k in keep if k in record}, "path": path, "events": events}
 
 

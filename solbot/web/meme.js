@@ -37,7 +37,9 @@
   const REASON = {
     stop: "stop de −25 %", trailing: "trailing desde el máximo", liquidez: "se fue la liquidez (rug)",
     tiempo: "límite de 24 h", tp1: "tomó ganancia a 2x", tp2: "tomó ganancia a 3x",
+    sin_ruta: "nadie compra: se perdió todo",
   };
+  const FAIL = { fallo: "la transacción falló", sin_ruta: "Jupiter no encontró ruta", error: "Jupiter no respondió" };
   const isGoodExit = (r) => r === "trailing" || (r || "").startsWith("tp");
 
   let snap = null;
@@ -345,11 +347,19 @@
       if (!firstTape && !seenEvents.has(id)) li.classList.add("is-new");
       seenEvents.add(id);
       const isBuy = e.kind === "buy";
-      const cls = isBuy ? "buy" : isGoodExit(e.reason) ? "up" : "down";
       const what = el("span", "what");
-      what.append(el("i", cls, isBuy ? "Compró" : "Vendió"), document.createTextNode(e.symbol || "?"));
-      li.append(el("time", null, hm.format(new Date(e.t * 1000))), what, el("span", "amt " + (isBuy ? "" : cls), isBuy ? money(e.usd) : `recibió ${money(e.usd)}`));
-      li.append(el("span", "why", isBuy ? `liquidez $${f0.format(e.liq)}, ${f0.format(e.age_min)} min de vida` : `${REASON[e.reason] || e.reason}, precio ${mult(e.mult)}`));
+      const time = el("time", null, hm.format(new Date(e.t * 1000)));
+      if (e.kind === "fail") {
+        what.append(el("i", "warn", e.side === "buy" ? "Compra fallida" : "Venta fallida"), document.createTextNode(e.symbol || "?"));
+        li.append(time, what, el("span", "amt down", e.fee ? `${MINUS}${money(e.fee)} red` : ""));
+        li.append(el("span", "why", `${FAIL[e.note] || e.note}${e.side === "sell" ? ", se reintenta" : ""}${e.reason ? ` (${REASON[e.reason] || e.reason})` : ""}`));
+      } else {
+        const cls = isBuy ? "buy" : isGoodExit(e.reason) ? "up" : "down";
+        what.append(el("i", cls, isBuy ? "Compró" : "Vendió"), document.createTextNode(e.symbol || "?"));
+        li.append(time, what, el("span", "amt " + (isBuy ? "" : cls), isBuy ? money(e.usd) : `recibió ${money(e.usd)}`));
+        const real = e.real_mult !== undefined ? `, ejecutado ${mult(e.real_mult)}` : "";
+        li.append(el("span", "why", isBuy ? `liquidez $${f0.format(e.liq)}, ${f0.format(e.age_min)} min de vida` : `${REASON[e.reason] || e.reason}: pantalla ${mult(e.mult)}${real}`));
+      }
       li.addEventListener("click", () => openTrade(e.token));
       list.append(li);
     }
@@ -497,7 +507,10 @@
     if (s.worst_stop !== null) item(`El peor "stop de −25 %" vendió a ${mult(s.worst_stop)}.`, "Si la moneda se desploma entre dos consultas, el stop vende a lo que quede.");
     const rugs = s.exit_reasons.liquidez || 0;
     if (rugs) item(`${rugs} ${rugs === 1 ? "salida" : "salidas"} porque sacaron la liquidez.`, "Eso es un rug pull: el precio se ve bien, pero ya no hay quién te compre.");
-    item("Aquí se cobra 1 % por operación, el impacto en el precio y un 2 % por llegar tarde.", "Los posts no muestran comisiones ni deslizamiento.");
+    const tx = s.tx || {};
+    const failed = (tx.fallidas || 0) + (tx.sin_ruta || 0);
+    if (tx.intentos) item(`${failed} de ${tx.intentos} transacciones fallaron.`, `Cada intento pagó la red igual: ${money(s.network_fees)} en comisiones hasta ahora. Una venta fallida se reintenta con el precio que haya después.`);
+    item("Cada operación usa la cotización real de Jupiter tras 1.5 s de retraso, más 1 % del bot.", "Los posts no muestran comisiones, deslizamiento ni transacciones fallidas.");
     item("Ningún post enseña su billetera.", "Cualquier ganancia real en Solana se puede comprobar en la blockchain. Si no te la enseñan, no existe.");
   }
 
@@ -537,6 +550,7 @@
       [isOpen ? "Precio ahora" : "Último precio", price(last)],
       ["Máximo visto", mult(t.peak / t.entry)],
     ];
+    if (t.fees) stats.push(["Comisiones de red", money(t.fees)]);
     const dl = $("#dStats");
     dl.replaceChildren();
     for (const [k, v, cls] of stats) { const b = el("div"); b.append(el("dt", null, k), el("dd", cls || "", v)); dl.append(b); }
@@ -544,8 +558,15 @@
     ev.replaceChildren();
     for (const e of d.events) {
       const li = el("li");
-      const text = e.kind === "buy" ? `Compró ${money(e.usd)} a ${price(e.price)}` : `Vendió ${f0.format(e.frac * 100)} %: recibió ${money(e.usd)} (${REASON[e.reason] || e.reason})`;
-      li.append(el("span", e.kind === "buy" ? "buy" : isGoodExit(e.reason) ? "up" : "down", text), el("time", null, at(e.t)));
+      let text, cls;
+      if (e.kind === "buy") { text = `Compró ${money(e.usd)} a ${price(e.price)}`; cls = "buy"; }
+      else if (e.kind === "fail") { text = `${e.side === "buy" ? "Compra" : "Venta"} fallida: ${FAIL[e.note] || e.note}${e.fee ? `, pagó ${money(e.fee)} de red` : ""}`; cls = "warn"; }
+      else {
+        const real = e.real_mult !== undefined ? `, en pantalla ${mult(e.mult)} pero ejecutado ${mult(e.real_mult)}` : "";
+        text = `Vendió ${f0.format(e.frac * 100)} %: recibió ${money(e.usd)} (${REASON[e.reason] || e.reason}${real})`;
+        cls = isGoodExit(e.reason) ? "up" : "down";
+      }
+      li.append(el("span", cls, text), el("time", null, at(e.t)));
       ev.append(li);
     }
     const links = $("#dLinks");
