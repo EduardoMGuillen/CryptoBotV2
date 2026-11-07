@@ -417,8 +417,7 @@ VARIANTS = {
     "sin_copias_30m": Rules(skip_copycats=True, min_age_min=30.0),
     # 11:55: retiradas por fallidas con ≥30 cerradas (datos en data/meme/archive/): sin_copias (−55 %),
     # todo_1_2x (−31 %), todo_1_5x (−30 %), alerta_rug (−51 %), mitad_1_3x (−53 %), loteria_3x (−63 %),
-    # pocas_grandes (−84 %, 29 cerradas).
-    "momentum": Rules(**_QUICK, min_buy_ratio=1.5, targets=((1.5, 0.5),), trail=0.25, stop=-0.20, rug_liq_drop=0.8),
+    # pocas_grandes (−84 %, 29 cerradas). 12:05: momentum (−48 %, 31 cerradas).
     # 2026-11-07 10:15: de 98 operaciones cerradas, las monedas de pump.fun (mint "...pump") sufrieron
     # rug 1 de 16 veces; las demás 59 de 82.
     "solo_pump": Rules(**_QUICK, only_pump=True, min_age_min=5.0, targets=((1.5, 0.5),), trail=0.25, stop=-0.20,
