@@ -414,21 +414,21 @@ VARIANTS = {
     # de los rugs: x1.76). Se asegura la mitad en 1.5x, el resto con trailing; sale antes ante rugs.
     "principal": Rules(skip_copycats=True, min_age_min=5.0, targets=((1.5, 0.5),), trail=0.25, stop=-0.20,
                        rug_liq_drop=0.8, max_hold_h=6.0, size_frac=0.06, max_open=8),
-    "sin_copias": Rules(skip_copycats=True),
     "sin_copias_30m": Rules(skip_copycats=True, min_age_min=30.0),
-    # Extremos:
-    "todo_1_2x": Rules(**_QUICK, targets=((1.2, 1.0),), stop=-0.15, rug_liq_drop=0.8, max_hold_h=2.0),
-    "todo_1_5x": Rules(**_QUICK, targets=((1.5, 1.0),), stop=-0.20, rug_liq_drop=0.8, max_hold_h=3.0),
-    "mitad_1_3x": Rules(**_QUICK, targets=((1.3, 0.5),), trail=0.20, stop=-0.20, rug_liq_drop=0.8),
-    "alerta_rug": Rules(**_QUICK, targets=((1.5, 0.5),), trail=0.25, rug_liq_drop=0.9),
+    # 11:55: retiradas por fallidas con ≥30 cerradas (datos en data/meme/archive/): sin_copias (−55 %),
+    # todo_1_2x (−31 %), todo_1_5x (−30 %), alerta_rug (−51 %), mitad_1_3x (−53 %), loteria_3x (−63 %),
+    # pocas_grandes (−84 %, 29 cerradas).
     "momentum": Rules(**_QUICK, min_buy_ratio=1.5, targets=((1.5, 0.5),), trail=0.25, stop=-0.20, rug_liq_drop=0.8),
-    "pocas_grandes": Rules(**_QUICK, size_frac=0.15, max_open=4, targets=((1.5, 1.0),), stop=-0.20, rug_liq_drop=0.8),
-    "loteria_3x": Rules(**_QUICK, targets=((3.0, 0.5),), trail=0.40, stop=-0.50, max_hold_h=12.0),
     # 2026-11-07 10:15: de 98 operaciones cerradas, las monedas de pump.fun (mint "...pump") sufrieron
     # rug 1 de 16 veces; las demás 59 de 82.
     "solo_pump": Rules(**_QUICK, only_pump=True, min_age_min=5.0, targets=((1.5, 0.5),), trail=0.25, stop=-0.20,
                        rug_liq_drop=0.8, max_hold_h=6.0, size_frac=0.06, max_open=8),
     "solo_pump_1_5x": Rules(**_QUICK, only_pump=True, targets=((1.5, 1.0),), stop=-0.20, rug_liq_drop=0.8, max_hold_h=3.0),
+    # 11:55: combinan las dos señales que menos pierden (pump.fun y esperar edad / momentum).
+    "solo_pump_30m": Rules(**_QUICK, only_pump=True, min_age_min=30.0, targets=((1.5, 0.5),), trail=0.25, stop=-0.20,
+                           rug_liq_drop=0.8, max_hold_h=6.0, size_frac=0.06, max_open=8),
+    "solo_pump_momentum": Rules(**_QUICK, only_pump=True, min_buy_ratio=1.5, targets=((1.5, 1.0),), stop=-0.20,
+                                rug_liq_drop=0.8, max_hold_h=3.0),
 }
 
 
