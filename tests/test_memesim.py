@@ -157,3 +157,30 @@ def test_snapshot_summarizes_files(tmp_path):
     assert snap["open"][0]["mult"] == 2.0 and snap["open"][0]["pnl"] == 4.0
     assert [c["symbol"] for c in snap["closed"]] == ["B", "A"]
     assert len(snap["curve"]) == 2  # la línea a medio escribir se ignora
+
+
+def test_trade_detail_rejects_bad_tokens(tmp_path):
+    from solbot.memesim import trade_detail
+
+    for bad in ("", "../../etc/passwd", "a" * 50, "0OIl" * 10):
+        with pytest.raises(ValueError):
+            trade_detail(tmp_path, bad)
+
+
+def test_trade_detail_reads_closed_trade_and_downsamples(tmp_path):
+    import json
+
+    from solbot.memesim import trade_detail
+
+    mint = "So11111111111111111111111111111111111111112"
+    closed = {"symbol": "X", "token": mint, "pool": "P", "entry": 1.0, "qty": 0.0, "cost": 4.0, "opened": 0.0,
+              "peak": 2.0, "entry_liq": 1.0, "steps_done": 1, "proceeds": 6.0, "last": 1.5, "closed": 9.0,
+              "reason": "trailing", "pnl": 2.0, "mult": 1.5}
+    (tmp_path / "state.json").write_text(json.dumps({"positions": {}, "closed": [closed]}))
+    (tmp_path / "paths").mkdir()
+    (tmp_path / "paths" / f"{mint}.jsonl").write_text("".join(f'{{"t": {i}, "p": {i}, "l": 1}}\n' for i in range(1000)))
+    (tmp_path / "events.jsonl").write_text(f'{{"t": 1, "kind": "buy", "token": "{mint}"}}\n{{"t": 2, "kind": "buy", "token": "other"}}\n')
+    d = trade_detail(tmp_path, mint, max_points=100)
+    assert d["status"] == "closed" and d["trade"]["reason"] == "trailing"
+    assert len(d["path"]) == 100 and d["path"][-1]["t"] == 999
+    assert len(d["events"]) == 1

@@ -1,73 +1,112 @@
 <!doctype html>
-<html lang="es" data-theme="dark">
+<html lang="es">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="color-scheme" content="dark light">
+<meta name="color-scheme" content="dark">
 <title>Meme Desk</title>
 <link rel="icon" href="/static/icon.svg" type="image/svg+xml">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;700&display=swap">
-<link rel="stylesheet" href="/static/app.css">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Unbounded:wght@400;600;800&family=Geist:wght@400;500;600;700&display=swap">
 <link rel="stylesheet" href="/static/meme.css">
 <script src="/static/vendor/lightweight-charts.standalone.production.js" defer></script>
 <script src="/static/meme.js" defer></script>
 </head>
-<body class="meme">
-<main class="desk">
-  <header class="desk__top">
-    <div class="desk__brand">
-      <span class="desk__dot" id="liveDot"></span>
-      <span class="desk__name">MEME DESK</span>
-      <span class="chip chip--live">PAPEL · sin dinero real</span>
+<body>
+<div class="page">
+  <header class="bar">
+    <div class="bar__brand">
+      <svg class="bar__mark" viewBox="0 0 32 32" aria-hidden="true"><path d="M4 6h24l-9 10v9l-6 3V16z"/></svg>
+      <span class="bar__name">Meme Desk</span>
+      <span class="paper" title="El simulador nunca firma ni envía órdenes">Papel: ningún dinero real</span>
     </div>
-    <div class="desk__meta">
-      <span id="updated">Conectando…</span>
-      <a class="btn btn--small" href="/">← Solbot</a>
+    <div class="bar__right">
+      <span class="pulse" id="pulse" aria-hidden="true"></span>
+      <span id="updated" class="bar__updated">Conectando…</span>
+      <a class="bar__back" href="/">Volver a Solbot</a>
     </div>
   </header>
 
-  <section class="headline" aria-live="polite">
-    <div class="headline__line"><span id="hStart">$100.00</span><span class="headline__arrow">→</span><span id="hNow">—</span></div>
-    <div class="headline__sub" id="hSub">Esperando datos del simulador…</div>
+  <section class="hero">
+    <div class="hero__money">
+      <p class="hero__label">Libro en papel, empezó con <span id="startCash">$100</span></p>
+      <div class="hero__value" id="value" aria-live="polite">—</div>
+      <p class="hero__delta" id="delta"></p>
+      <dl class="hero__facts" id="facts"></dl>
+    </div>
+    <figure class="sieve">
+      <figcaption class="sieve__caption"><span id="sieveTitle">Colador de monedas</span><span class="sieve__hint">Cada punto es una moneda nueva. Las que no pasan un filtro caen ahí.</span></figcaption>
+      <canvas id="sieve" aria-hidden="true"></canvas>
+      <ol class="gates" id="gates"></ol>
+    </figure>
   </section>
 
-  <section class="stats" id="stats"></section>
-
-  <section class="grid-desk">
-    <article class="card card--curve">
-      <div class="card__head">
-        <div><div class="card__title">Libro</div><div class="card__caption">Valor del libro cada minuto (posiciones abiertas al último precio).</div></div>
+  <section class="duo">
+    <div class="panel panel--radar">
+      <div class="panel__head">
+        <div>
+          <h2>Posiciones abiertas</h2>
+          <p id="radarSub">Altura: cuánto se ha multiplicado. Tamaño: cuánto vale.</p>
+        </div>
       </div>
-      <div class="curve" id="curve"></div>
-    </article>
-
-    <article class="card card--funnel">
-      <div class="card__head"><div><div class="card__title">Embudo</div><div class="card__caption">Por qué se rechazó cada moneda.</div></div></div>
-      <ul class="funnel" id="funnel"></ul>
-    </article>
-
-    <article class="card card--feed">
-      <div class="card__head"><div><div class="card__title">En vivo</div><div class="card__caption">Últimas compras y ventas.</div></div></div>
-      <ol class="feed" id="feed"></ol>
-    </article>
-
-    <article class="card card--open">
-      <div class="card__head"><div><div class="card__title">Posiciones abiertas</div><div class="card__caption" id="openCaption"></div></div></div>
-      <div class="table-scroll"><table class="table" id="openTable"></table></div>
-    </article>
-
-    <article class="card card--closed">
-      <div class="card__head"><div><div class="card__title">Operaciones cerradas</div><div class="card__caption">Las 100 más recientes.</div></div></div>
-      <div class="table-scroll"><table class="table" id="closedTable"></table></div>
-    </article>
-
-    <article class="card card--truth">
-      <div class="card__head"><div><div class="card__title">Lo que los posts no muestran</div></div></div>
-      <ul class="truth" id="truth"></ul>
-    </article>
+      <div class="radar" id="radar"></div>
+    </div>
+    <aside class="tape" aria-label="Movimientos en vivo">
+      <h2>En vivo</h2>
+      <ol id="tape"></ol>
+    </aside>
   </section>
-</main>
+
+  <section class="panel panel--curve">
+    <div class="panel__head">
+      <div><h2>Valor del libro</h2><p>Incluye las posiciones abiertas a su último precio.</p></div>
+      <div class="seg" role="tablist" aria-label="Rango" id="ranges">
+        <button role="tab" data-h="1">1 h</button>
+        <button role="tab" data-h="6">6 h</button>
+        <button role="tab" data-h="24">24 h</button>
+        <button role="tab" data-h="0" aria-selected="true">Todo</button>
+      </div>
+    </div>
+    <div class="curve" id="curve"><div class="tip" id="curveTip" hidden></div></div>
+  </section>
+
+  <section class="panel panel--trades">
+    <div class="panel__head">
+      <div><h2>Operaciones</h2><p>Toca una fila para ver su gráfica.</p></div>
+      <div class="seg" role="tablist" aria-label="Filtro" id="filters">
+        <button role="tab" data-f="all" aria-selected="true">Todas</button>
+        <button role="tab" data-f="open">Abiertas</button>
+        <button role="tab" data-f="win">Ganadas</button>
+        <button role="tab" data-f="loss">Perdidas</button>
+      </div>
+    </div>
+    <div class="scroll"><table class="trades" id="trades"></table></div>
+  </section>
+
+  <section class="truth" aria-labelledby="truthTitle">
+    <h2 id="truthTitle">Lo que los posts de X no te enseñan</h2>
+    <ul id="truth"></ul>
+  </section>
+</div>
+
+<div class="radar-tip" id="radarTip" hidden></div>
+
+<div class="drawer" id="drawer" hidden>
+  <div class="drawer__backdrop" data-close></div>
+  <article class="drawer__panel" role="dialog" aria-modal="true" aria-labelledby="dTitle" tabindex="-1">
+    <header class="drawer__head">
+      <div>
+        <h3 id="dTitle">—</h3>
+        <p id="dSub"></p>
+      </div>
+      <button class="drawer__close" data-close aria-label="Cerrar">×</button>
+    </header>
+    <dl class="drawer__stats" id="dStats"></dl>
+    <div class="drawer__chart" id="dChart"></div>
+    <ol class="drawer__events" id="dEvents"></ol>
+    <p class="drawer__links" id="dLinks"></p>
+  </article>
+</div>
 </body>
 </html>

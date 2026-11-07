@@ -1,17 +1,25 @@
 "use strict";
-// Meme Desk: solo lee /api/meme. Los nombres de tokens vienen de internet: siempre textContent.
+// Meme Desk. Solo lee /api/meme y /api/meme/trade.
+// Los nombres de tokens los pone cualquiera en internet: siempre textContent, nunca innerHTML.
 (() => {
   const $ = (s) => document.querySelector(s);
-  const f2 = new Intl.NumberFormat("es-HN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-  const f0 = new Intl.NumberFormat("es-HN", { maximumFractionDigits: 0 });
-  const timeF = new Intl.DateTimeFormat("es-HN", { hour: "2-digit", minute: "2-digit" });
-  const dayTimeF = new Intl.DateTimeFormat("es-HN", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+  const LOCALE = "es-HN";
+  const f2 = new Intl.NumberFormat(LOCALE, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const f1 = new Intl.NumberFormat(LOCALE, { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+  const f0 = new Intl.NumberFormat(LOCALE, { maximumFractionDigits: 0 });
+  const hm = new Intl.DateTimeFormat(LOCALE, { hour: "numeric", minute: "2-digit" });
+  const dhm = new Intl.DateTimeFormat(LOCALE, { day: "numeric", month: "short", hour: "numeric", minute: "2-digit" });
   const MINUS = "−";
+  const REDUCED = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
   const money = (v) => (v < 0 ? MINUS : "") + "$" + f2.format(Math.abs(v));
   const signed = (v) => (v >= 0 ? "+" : MINUS) + "$" + f2.format(Math.abs(v));
-  const pct = (v) => (v >= 0 ? "+" : MINUS) + f0.format(Math.abs(v * 100)) + "%";
-  const mult = (m) => "x" + f2.format(m);
+  const pct = (v) => (v >= 0 ? "+" : MINUS) + f1.format(Math.abs(v * 100)) + " %";
+  const mult = (m) => "x" + (m >= 10 ? f1.format(m) : f2.format(m));
   const tone = (v) => (v > 0 ? "up" : v < 0 ? "down" : "");
+  const price = (p) => (p >= 1 ? "$" + f2.format(p) : "$" + Number(p).toPrecision(4));
+  const ago = (sec) => (sec < 3600 ? `${f0.format(sec / 60)} min` : sec < 172800 ? `${f1.format(sec / 3600)} h` : `${f0.format(sec / 86400)} días`);
+  const at = (t) => (Date.now() / 1000 - t < 86400 ? hm : dhm).format(new Date(t * 1000));
 
   function el(tag, cls, text) {
     const n = document.createElement(tag);
@@ -19,196 +27,617 @@
     if (text !== undefined && text !== null) n.textContent = String(text);
     return n;
   }
-
-  const FUNNEL = {
-    vistos: "Monedas vistas",
-    descartados_sin_liquidez: "Murieron sin liquidez (30 min)",
-    rechazo_edad: "Más de 6 h de vida",
-    rechazo_par: "No cotiza contra SOL/USDC",
-    rechazo_mint_authority: "Pueden crear más tokens",
-    rechazo_freeze_authority: "Pueden congelar tu saldo",
-    rechazo_mint_ilegible: "Mint ilegible",
-    rechazo_top10: "Top 10 holders > 35 %",
-    rechazo_holder_grande: "Un holder > 5 %",
-    sin_cupo: "Pasaron, pero sin cupo (10 abiertas)",
-    compras: "Compradas",
+  const svg = (tag, attrs = {}) => {
+    const n = document.createElementNS("http://www.w3.org/2000/svg", tag);
+    for (const [k, v] of Object.entries(attrs)) n.setAttribute(k, v);
+    return n;
   };
-  const REASON = { stop: "stop −25 %", trailing: "trailing", liquidez: "liquidez se fue", tiempo: "24 h", tp1: "toma 2x", tp2: "toma 3x" };
+  const cssVar = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 
-  let chart, series;
+  const REASON = {
+    stop: "stop de −25 %", trailing: "trailing desde el máximo", liquidez: "se fue la liquidez (rug)",
+    tiempo: "límite de 24 h", tp1: "tomó ganancia a 2x", tp2: "tomó ganancia a 3x",
+  };
+  const isGoodExit = (r) => r === "trailing" || (r || "").startsWith("tp");
 
-  function renderCurve(s) {
-    if (!window.LightweightCharts) return;
-    const LC = window.LightweightCharts;
-    const css = getComputedStyle(document.documentElement);
-    const c = (name) => css.getPropertyValue(name).trim();
-    if (!chart) {
-      chart = LC.createChart($("#curve"), {
-        autoSize: true,
-        layout: { background: { type: LC.ColorType.Solid, color: "transparent" }, textColor: c("--muted"), fontFamily: "Manrope, system-ui", fontSize: 12 },
-        grid: { vertLines: { visible: false }, horzLines: { color: c("--line") } },
-        rightPriceScale: { borderVisible: false },
-        timeScale: { borderColor: c("--line"), timeVisible: true, secondsVisible: false },
-        localization: { locale: "es-HN", priceFormatter: (v) => money(v) },
-      });
-      series = chart.addSeries(LC.AreaSeries, {
-        lineColor: c("--violet"), topColor: "rgba(139,108,255,0.28)", bottomColor: "rgba(139,108,255,0)",
-        lineWidth: 2, priceLineVisible: false,
-      });
-      series.createPriceLine({ price: s.start_cash, color: c("--muted"), lineWidth: 1, lineStyle: LC.LineStyle.Dashed, axisLabelVisible: true, title: "inicio" });
+  let snap = null;
+
+  // ======================================================================= colador
+  // Orden en que una moneda enfrenta los filtros; cada puerta agrupa motivos del embudo.
+  const GATES = [
+    { key: "dead", label: "Murieron sin liquidez", color: "--muted", keys: ["descartados_sin_liquidez"] },
+    { key: "market", label: "Viejas o mal par", color: "--warn", keys: ["rechazo_edad", "rechazo_par"] },
+    { key: "contract", label: "Contrato peligroso", color: "--loss", keys: ["rechazo_mint_authority", "rechazo_freeze_authority", "rechazo_mint_ilegible"] },
+    { key: "holders", label: "Pocas manos", color: "--sol", keys: ["rechazo_top10", "rechazo_holder_grande"] },
+    { key: "full", label: "Sin cupo", color: "--ink-2", keys: ["sin_cupo"] },
+    { key: "bought", label: "Compradas", color: "--gain", keys: ["compras"] },
+  ];
+  const gateCounts = (funnel) => GATES.map((g) => g.keys.reduce((a, k) => a + (funnel[k] || 0), 0));
+
+  const sieve = {
+    canvas: $("#sieve"), ctx: null, w: 0, h: 0, dots: [], queue: [], last: null, prevCounts: null, colors: [],
+    init() {
+      this.ctx = this.canvas.getContext("2d");
+      this.colors = GATES.map((g) => cssVar(g.color));
+      const resize = () => {
+        const r = this.canvas.getBoundingClientRect();
+        const dpr = window.devicePixelRatio || 1;
+        this.w = r.width; this.h = r.height;
+        this.canvas.width = r.width * dpr; this.canvas.height = r.height * dpr;
+        this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        if (REDUCED) this.draw();
+      };
+      new ResizeObserver(resize).observe(this.canvas);
+      resize();
+      if (!REDUCED) requestAnimationFrame((t) => this.frame(t));
+    },
+    gateX(i) { return this.w * (0.12 + i * 0.165); },
+    // Programa puntos para los cambios del embudo, repartidos en los próximos segundos.
+    feed(funnel, buys) {
+      const counts = gateCounts(funnel);
+      if (!this.prevCounts) {
+        // Primera carga: una muestra con la mezcla real de lo que ha pasado hasta ahora.
+        const total = counts.reduce((a, b) => a + b, 0);
+        if (total) counts.forEach((c, i) => { for (let k = 0; k < Math.round((c / total) * 36); k++) this.schedule(i, Math.random() * 9000); });
+      } else {
+        counts.forEach((c, i) => {
+          if (i === 5) return; // las compras salen con su nombre, abajo
+          // El simulador busca una vez por minuto: se reparten en el minuto para que fluya.
+          const n = Math.min(60, Math.max(0, c - this.prevCounts[i]));
+          for (let k = 0; k < n; k++) this.schedule(i, Math.random() * 55000);
+        });
+        const watching = Math.min(60, Math.max(0, (funnel.vistos || 0) - (this.prevVistos || 0) - counts.slice(0, 5).reduce((a, c, i) => a + Math.max(0, c - this.prevCounts[i]), 0)));
+        for (let k = 0; k < watching; k++) this.schedule(-1, Math.random() * 55000);
+      }
+      buys.forEach((b, k) => this.schedule(5, 800 + k * 1500, b.symbol));
+      this.prevCounts = counts;
+      this.prevVistos = funnel.vistos || 0;
+      if (REDUCED) this.draw();
+    },
+    schedule(gate, delay, label) { this.queue.push({ gate, at: performance.now() + delay, label }); },
+    spawn(q) {
+      const lane = this.h * 0.18 + Math.random() * this.h * 0.5;
+      this.dots.push({ x: -6, y: lane, vx: 0.9 + Math.random() * 0.7, vy: 0, gate: q.gate, label: q.label, state: "fly", life: 1, r: q.gate === 5 ? 5.5 : 2.6 });
+    },
+    frame(t) {
+      const now = performance.now();
+      this.queue = this.queue.filter((q) => (q.at <= now ? (this.spawn(q), false) : true));
+      for (const d of this.dots) {
+        if (d.state === "fly") {
+          d.x += d.vx;
+          d.y += Math.sin((d.x + d.y) / 40) * 0.25;
+          if (d.gate === -1 && d.x > this.gateX(0) - 14) d.state = "wait"; // sigue en observación
+          else if (d.gate >= 0 && d.gate < 5 && d.x >= this.gateX(d.gate) - 4) { d.state = "fall"; d.vx *= 0.25; }
+          else if (d.gate === 5 && d.x >= this.w - 34) { d.state = "land"; d.vx = 0; }
+        } else if (d.state === "fall") {
+          d.vy += 0.12; d.y += d.vy; d.x += d.vx;
+          if (d.y > this.h - 6) { d.y = this.h - 6; d.life -= 0.02; }
+        } else if (d.state === "wait") {
+          d.life -= 0.006; d.x += 0.05;
+        } else if (d.state === "land") {
+          d.life -= 0.0035;
+        }
+      }
+      this.dots = this.dots.filter((d) => d.life > 0 && d.x < this.w + 20);
+      this.draw();
+      requestAnimationFrame((tt) => this.frame(tt));
+    },
+    draw() {
+      const { ctx, w, h } = this;
+      if (!ctx || !w) return;
+      ctx.clearRect(0, 0, w, h);
+      // puertas: mallas verticales
+      for (let i = 0; i < 5; i++) {
+        const x = this.gateX(i);
+        ctx.strokeStyle = this.colors[i];
+        ctx.globalAlpha = 0.55;
+        ctx.lineWidth = 2;
+        ctx.setLineDash([3, 5]);
+        ctx.beginPath(); ctx.moveTo(x, h * 0.1); ctx.lineTo(x, h - 4); ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.globalAlpha = 0.08;
+        ctx.fillStyle = this.colors[i];
+        ctx.fillRect(x - 10, h - 22, 20, 22);
+      }
+      // salida: compradas
+      ctx.globalAlpha = 0.12;
+      ctx.fillStyle = this.colors[5];
+      ctx.beginPath(); ctx.roundRect(w - 46, h * 0.12, 40, h * 0.76, 14); ctx.fill();
+      ctx.globalAlpha = 1;
+      for (const d of this.dots) {
+        const color = d.gate === -1 ? cssVar("--ink-2") : d.state === "fly" && d.gate !== 5 ? cssVar("--ink-2") : this.colors[d.gate];
+        ctx.globalAlpha = Math.max(0, Math.min(1, d.life)) * (d.state === "fly" ? 0.85 : 1);
+        ctx.fillStyle = color;
+        if (d.gate === 5) { ctx.shadowColor = color; ctx.shadowBlur = 14; }
+        ctx.beginPath(); ctx.arc(d.x, d.y, d.r, 0, Math.PI * 2); ctx.fill();
+        ctx.shadowBlur = 0;
+        if (d.label && d.state === "land") {
+          ctx.font = "600 12px Geist, system-ui";
+          ctx.textAlign = "right";
+          ctx.fillStyle = cssVar("--gain");
+          ctx.fillText(d.label.slice(0, 14), w - 52, d.y + 4);
+          ctx.textAlign = "left";
+        }
+      }
+      ctx.globalAlpha = 1;
+    },
+  };
+
+  function renderGates(s) {
+    const counts = gateCounts(s.funnel);
+    const list = $("#gates");
+    list.replaceChildren();
+    GATES.forEach((g, i) => {
+      const li = el("li");
+      li.style.setProperty("--gate", cssVar(g.color));
+      li.append(el("b", null, f0.format(counts[i])), el("span", null, g.label));
+      list.append(li);
+    });
+    $("#sieveTitle").textContent = s.seen
+      ? `Dijo que no a ${f0.format(s.rejected)} de ${f0.format(s.seen)} monedas`
+      : "Buscando monedas nuevas…";
+  }
+
+  // ======================================================================= héroe
+  let shownValue = null;
+  function tweenValue(node, to) {
+    const from = shownValue ?? to;
+    shownValue = to;
+    if (REDUCED || from === to) { node.textContent = money(to); return; }
+    const t0 = performance.now();
+    const step = (t) => {
+      const k = Math.min(1, (t - t0) / 900);
+      const e = 1 - Math.pow(1 - k, 3);
+      node.textContent = money(from + (to - from) * e);
+      if (k < 1) requestAnimationFrame(step);
+    };
+    requestAnimationFrame(step);
+  }
+
+  function renderHero(s) {
+    const change = s.equity - s.start_cash;
+    $("#startCash").textContent = money(s.start_cash);
+    const value = $("#value");
+    value.className = "hero__value " + (change > 0.005 ? "is-up" : change < -0.005 ? "is-down" : "");
+    tweenValue(value, s.equity);
+    const delta = $("#delta");
+    delta.replaceChildren(
+      el("span", tone(change), `${signed(change)} (${pct(change / s.start_cash)})`),
+      document.createTextNode(` en ${ago(s.updated - s.started)}`),
+    );
+    const total = s.wins + s.losses;
+    const inPlay = s.open.reduce((a, p) => a + p.value, 0);
+    const facts = [
+      ["Ganadas", String(s.wins), s.wins ? "up" : ""],
+      ["Perdidas", String(s.losses), s.losses ? "down" : ""],
+      ["Ganado en cerradas", signed(s.realized), tone(s.realized)],
+      ["En juego", money(inPlay), ""],
+    ];
+    const dl = $("#facts");
+    dl.replaceChildren();
+    for (const [k, v, cls] of facts) {
+      const box = el("div");
+      box.append(el("dd", cls, v), el("dt", null, k));
+      dl.append(box);
     }
-    // Hora local de Honduras en el eje: lightweight-charts muestra UTC, así que se desplaza.
-    const offset = -new Date().getTimezoneOffset() * 60;
+    if (total) dl.title = `${f0.format((s.wins / total) * 100)} % de aciertos`;
+  }
+
+  // ======================================================================= radar
+  const radarTip = $("#radarTip");
+  function showTip(tip, title, rows, x, y) {
+    tip.replaceChildren(el("b", null, title));
+    for (const [k, v, cls] of rows) {
+      const r = el("div", "row");
+      r.append(el("span", null, k), el("span", cls || "", v));
+      tip.append(r);
+    }
+    tip.hidden = false;
+    const pad = 14;
+    const bw = tip.offsetWidth, bh = tip.offsetHeight;
+    tip.style.left = Math.min(window.innerWidth - bw - 8, x + pad) + "px";
+    tip.style.top = Math.max(8, y - bh - pad) + "px";
+  }
+
+  function renderRadar(s) {
+    const box = $("#radar");
+    const W = box.clientWidth, H = box.clientHeight;
+    const m = { l: 44, r: 70, t: 14, b: 28 };
+    const yMin = Math.log(0.2), yMax = Math.log(Math.max(4, ...s.open.map((p) => p.mult * 1.25)));
+    const maxAge = Math.max(0.25, ...s.open.map((p) => (s.updated - p.opened) / 3600)) * 1.12;
+    const X = (h) => m.l + (Math.min(h, maxAge) / maxAge) * (W - m.l - m.r);
+    const Y = (mu) => m.t + (1 - (Math.log(Math.max(0.2, mu)) - yMin) / (yMax - yMin)) * (H - m.t - m.b);
+
+    let root = box.querySelector("svg");
+    if (!root) {
+      root = svg("svg", { role: "img", "aria-label": "Mapa de posiciones abiertas" });
+      root.append(svg("g", { class: "lanes" }), svg("g", { class: "bubbles" }));
+      box.append(root);
+    }
+    root.setAttribute("viewBox", `0 0 ${W} ${H}`);
+    const lanes = root.querySelector(".lanes");
+    lanes.replaceChildren();
+    const lane = (mu, cls, label, lcls) => {
+      const y = Y(mu);
+      lanes.append(svg("line", { x1: m.l, x2: W - m.r, y1: y, y2: y, class: "lane " + cls }));
+      const t = svg("text", { x: W - m.r + 8, y: y + 4, class: "lane-label " + (lcls || "") });
+      t.textContent = label;
+      lanes.append(t);
+    };
+    lane(0.75, "lane--stop", "stop −25 %", "lane-label--stop");
+    lane(1, "lane--entry", "entrada");
+    lane(2, "lane--tp", "toma 2x", "lane-label--tp");
+    lane(3, "lane--tp", "toma 3x", "lane-label--tp");
+    const ticks = [0, maxAge / 2, maxAge].map((h) => {
+      const t = svg("text", { x: X(h), y: H - 6, class: "axis", "text-anchor": "middle" });
+      t.textContent = h === 0 ? "recién comprada" : h < 1 ? `${f0.format(h * 60)} min` : `${f1.format(h)} h`;
+      return t;
+    });
+    lanes.append(...ticks);
+    const yl = svg("text", { x: 0, y: m.t + 10, class: "axis" });
+    yl.textContent = "múltiplo";
+    lanes.append(yl);
+
+    const layer = root.querySelector(".bubbles");
+    const maxVal = Math.max(1, ...s.open.map((p) => p.value));
+    const keep = new Set();
+    const placed = s.open.map((p) => ({ p, x: X((s.updated - p.opened) / 3600), y: Y(p.mult), r: 7 + 17 * Math.sqrt(p.value / maxVal) }));
+    const labelDy = new Map();
+    const byY = [...placed].sort((a, b) => a.y - b.y);
+    const taken = [];
+    for (const it of byY) {
+      let ly = it.y;
+      for (const o of taken) if (Math.abs(o.x - it.x) < 110 && Math.abs(o.ly - ly) < 15) ly = o.ly + 15;
+      taken.push({ x: it.x, ly });
+      labelDy.set(it.p.token, ly - it.y);
+    }
+    for (const p of s.open) {
+      keep.add(p.token);
+      let g = layer.querySelector(`[data-token="${CSS.escape(p.token)}"]`);
+      if (!g) {
+        g = svg("g", { class: "bubble", tabindex: "0", role: "button", "data-token": p.token });
+        g.append(svg("circle", { cx: 0, cy: 0, r: 0 }), svg("text", { x: 0, y: 4 }));
+        g.style.transform = `translate(${X(0)}px, ${Y(1)}px)`;
+        g.addEventListener("mouseenter", (e) => g._tip && showTip(radarTip, ...g._tip(), e.clientX, e.clientY));
+        g.addEventListener("mousemove", (e) => g._tip && showTip(radarTip, ...g._tip(), e.clientX, e.clientY));
+        g.addEventListener("mouseleave", () => (radarTip.hidden = true));
+        g.addEventListener("click", () => openTrade(p.token));
+        g.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openTrade(p.token); } });
+        layer.append(g);
+      }
+      const r = 7 + 17 * Math.sqrt(p.value / maxVal);
+      g.setAttribute("class", "bubble " + (p.pnl >= 0 ? "is-up" : "is-down"));
+      g.setAttribute("aria-label", `${p.symbol}: ${mult(p.mult)}, ${signed(p.pnl)}`);
+      const age = (s.updated - p.opened) / 3600;
+      requestAnimationFrame(() => (g.style.transform = `translate(${X(age)}px, ${Y(p.mult)}px)`));
+      g.querySelector("circle").setAttribute("r", r);
+      const label = g.querySelector("text");
+      label.setAttribute("x", r + 6);
+      label.setAttribute("y", 4 + (labelDy.get(p.token) || 0));
+      label.textContent = p.symbol.slice(0, 12);
+      g._tip = () => [p.symbol, [
+        ["Múltiplo", mult(p.mult), tone(p.mult - 1)],
+        ["Máximo visto", mult(p.peak_mult)],
+        ["Costo", money(p.cost)],
+        ["Vale ahora", money(p.value)],
+        ["Resultado", signed(p.pnl), tone(p.pnl)],
+        ["Abierta hace", ago(s.updated - p.opened)],
+      ]];
+    }
+    layer.querySelectorAll(".bubble").forEach((g) => { if (!keep.has(g.dataset.token)) g.remove(); });
+    let empty = box.querySelector(".radar__empty");
+    if (!s.open.length) {
+      if (!empty) { empty = el("div", "radar__empty", "No hay posiciones abiertas. Cuando una moneda pase todos los filtros aparecerá aquí."); box.append(empty); }
+    } else if (empty) empty.remove();
+    $("#radarSub").textContent = `${s.open.length} de 10 cupos usados, 4 % del libro en cada una. Altura: cuánto se ha multiplicado.`;
+  }
+
+  // ======================================================================= cinta
+  const seenEvents = new Set();
+  let firstTape = true;
+  function renderTape(s) {
+    const list = $("#tape");
+    list.replaceChildren();
+    if (!s.events.length) { list.append(el("li", "empty", "Todavía no hay movimientos.")); return; }
+    for (const e of s.events) {
+      const id = `${e.t}-${e.token}-${e.kind}`;
+      const li = el("li");
+      if (!firstTape && !seenEvents.has(id)) li.classList.add("is-new");
+      seenEvents.add(id);
+      const isBuy = e.kind === "buy";
+      const cls = isBuy ? "buy" : isGoodExit(e.reason) ? "up" : "down";
+      const what = el("span", "what");
+      what.append(el("i", cls, isBuy ? "Compró" : "Vendió"), document.createTextNode(e.symbol || "?"));
+      li.append(el("time", null, hm.format(new Date(e.t * 1000))), what, el("span", "amt " + (isBuy ? "" : cls), isBuy ? money(e.usd) : `recibió ${money(e.usd)}`));
+      li.append(el("span", "why", isBuy ? `liquidez $${f0.format(e.liq)}, ${f0.format(e.age_min)} min de vida` : `${REASON[e.reason] || e.reason}, precio ${mult(e.mult)}`));
+      li.addEventListener("click", () => openTrade(e.token));
+      list.append(li);
+    }
+    firstTape = false;
+  }
+
+  // ======================================================================= curva
+  let curveChart, curveSeries, rangeHours = 0;
+  const TZ = -new Date().getTimezoneOffset() * 60; // el gráfico pinta en UTC: se desplaza a hora local
+  function renderCurve(s) {
+    const LC = window.LightweightCharts;
+    if (!LC) return;
+    if (!curveChart) {
+      const box = $("#curve");
+      curveChart = LC.createChart(box, {
+        autoSize: true,
+        layout: { background: { type: LC.ColorType.Solid, color: "transparent" }, textColor: cssVar("--muted"), fontFamily: "Geist, system-ui", fontSize: 12 },
+        grid: { vertLines: { visible: false }, horzLines: { color: cssVar("--line") } },
+        rightPriceScale: { borderVisible: false },
+        timeScale: { borderColor: cssVar("--line"), timeVisible: true, secondsVisible: false },
+        crosshair: { mode: LC.CrosshairMode.Magnet, horzLine: { visible: false, labelVisible: false }, vertLine: { color: cssVar("--line-2"), labelVisible: false } },
+        localization: { locale: LOCALE, priceFormatter: (v) => money(v) },
+        handleScale: { mouseWheel: false },
+      });
+      curveSeries = curveChart.addSeries(LC.AreaSeries, {
+        lineColor: cssVar("--sol"), lineWidth: 2.5, topColor: "rgba(153,69,255,0.35)", bottomColor: "rgba(153,69,255,0)",
+        priceLineVisible: false, crosshairMarkerBorderColor: cssVar("--bg"), crosshairMarkerRadius: 5,
+      });
+      curveSeries.createPriceLine({ price: s.start_cash, color: cssVar("--muted"), lineWidth: 1, lineStyle: LC.LineStyle.Dashed, axisLabelVisible: true, title: "inicio" });
+      const tip = $("#curveTip");
+      curveChart.subscribeCrosshairMove((param) => {
+        const d = param.time && param.seriesData.get(curveSeries);
+        if (!d || !param.point) { tip.hidden = true; return; }
+        const change = d.value - s.start_cash;
+        tip.replaceChildren(el("b", null, money(d.value)));
+        const r = el("div", "row");
+        r.append(el("span", null, dhm.format(new Date((param.time - TZ) * 1000))), el("span", tone(change), pct(change / s.start_cash)));
+        tip.append(r);
+        tip.hidden = false;
+        tip.style.left = Math.min(box.clientWidth - tip.offsetWidth - 70, param.point.x + 14) + "px";
+        tip.style.top = "8px";
+      });
+    }
     const seen = new Set();
     const data = [];
     for (const p of s.curve) {
-      const t = Math.floor(p.t) + offset;
+      const t = Math.floor(p.t) + TZ;
       if (seen.has(t)) continue;
       seen.add(t);
       data.push({ time: t, value: p.equity });
     }
-    series.setData(data);
+    // Último punto: el valor de ahora, para que la curva termine donde dice el titular.
+    const nowT = Math.floor(s.updated) + TZ;
+    if (!data.length || nowT > data[data.length - 1].time) data.push({ time: nowT, value: s.equity });
+    curveSeries.setData(data);
+    applyRange();
   }
-
-  function stat(label, value, sub, cls) {
-    const box = el("div", "stat");
-    box.append(el("div", "stat__label", label));
-    const v = el("div", "stat__value " + (cls || ""), value);
-    box.append(v);
-    if (sub) box.append(el("div", "stat__sub", sub));
-    return box;
+  function applyRange() {
+    if (!curveChart || !snap) return;
+    if (!rangeHours) { curveChart.timeScale().fitContent(); return; }
+    const to = Math.floor(snap.updated) + TZ;
+    curveChart.timeScale().setVisibleRange({ from: to - rangeHours * 3600, to });
   }
+  function segmented(id, onPick) {
+    const root = $(id);
+    root.addEventListener("click", (e) => {
+      const b = e.target.closest("button");
+      if (!b) return;
+      root.querySelectorAll("button").forEach((x) => x.setAttribute("aria-selected", String(x === b)));
+      onPick(b);
+    });
+  }
+  segmented("#ranges", (b) => { rangeHours = Number(b.dataset.h); applyRange(); });
 
-  function render(s) {
-    const change = s.equity - s.start_cash;
-    $("#hStart").textContent = money(s.start_cash);
-    const now = $("#hNow");
-    now.textContent = money(s.equity);
-    now.className = tone(change);
-    const hours = (s.updated - s.started) / 3600;
-    const span = hours < 48 ? `${f0.format(hours)} h` : `${f0.format(hours / 24)} días`;
-    $("#hSub").textContent = s.seen
-      ? `Rechazó ${f0.format(s.rejected)} de ${f0.format(s.seen)} monedas · ${f0.format(s.bought)} compras · ${span}`
-      : "Buscando monedas…";
+  // ======================================================================= tabla
+  let filter = "all";
+  let sort = { key: "time", dir: -1 };
+  const COLUMNS = [
+    { key: "symbol", label: "Moneda" },
+    { key: "state", label: "Estado" },
+    { key: "time", label: "Abrió" },
+    { key: "dur", label: "Duró", num: true },
+    { key: "mult", label: "Múltiplo", num: true },
+    { key: "pnl", label: "Resultado", num: true },
+    { key: "reason", label: "Cómo salió" },
+  ];
+  segmented("#filters", (b) => { filter = b.dataset.f; renderTable(snap); });
 
-    const total = s.wins + s.losses;
-    const stats = $("#stats");
-    stats.replaceChildren(
-      stat("Resultado", pct(change / s.start_cash), signed(change), tone(change)),
-      stat("Ganadas / perdidas", `${s.wins} / ${s.losses}`, total ? `${f0.format((s.wins / total) * 100)} % aciertos` : "sin cierres aún"),
-      stat("Realizado", signed(s.realized), "ganancia de cerradas", tone(s.realized)),
-      stat("Abiertas", String(s.open.length), money(s.open.reduce((a, p) => a + p.value, 0)) + " en juego"),
-      stat("Mejor cerrada", s.best ? signed(s.best.pnl) : "—", s.best ? `${s.best.symbol} ${mult(s.best.mult)}` : "", s.best ? tone(s.best.pnl) : ""),
-      stat("Peor cerrada", s.worst ? signed(s.worst.pnl) : "—", s.worst ? `${s.worst.symbol} ${mult(s.worst.mult)}` : "", s.worst ? tone(s.worst.pnl) : ""),
-    );
-
-    // embudo
-    const funnel = $("#funnel");
-    funnel.replaceChildren();
-    const keys = Object.keys(s.funnel).sort((a, b) => (a === "vistos" ? -1 : b === "vistos" ? 1 : a === "compras" ? 1 : b === "compras" ? -1 : s.funnel[b] - s.funnel[a]));
-    for (const k of keys) {
-      const li = el("li");
-      li.append(el("span", null, FUNNEL[k] || k), el("span", "n", f0.format(s.funnel[k])));
-      const bar = el("div", "bar");
-      const fill = el("span", k === "compras" ? "is-buy" : "");
-      fill.style.width = `${Math.max(1, (s.funnel[k] / Math.max(1, s.seen)) * 100)}%`;
-      bar.append(fill);
-      li.append(bar);
-      funnel.append(li);
+  function rows(s) {
+    const open = s.open.map((p) => ({ token: p.token, symbol: p.symbol, state: "open", time: p.opened, dur: s.updated - p.opened, mult: p.mult, pnl: p.pnl, reason: "" }));
+    const closed = s.closed.map((c) => ({ token: c.token, symbol: c.symbol, state: c.pnl > 0 ? "win" : "loss", time: c.opened, dur: c.closed - c.opened, mult: c.mult, pnl: c.pnl, reason: REASON[c.reason] || c.reason }));
+    return open.concat(closed).filter((r) => filter === "all" || r.state === filter);
+  }
+  function renderTable(s) {
+    if (!s) return;
+    const table = $("#trades");
+    table.replaceChildren();
+    const thead = el("thead"), tr = el("tr");
+    for (const c of COLUMNS) {
+      const th = el("th", c.num ? "num" : "");
+      if (sort.key === c.key) th.setAttribute("aria-sort", sort.dir > 0 ? "ascending" : "descending");
+      const b = el("button", null, c.label);
+      b.addEventListener("click", () => { sort = { key: c.key, dir: sort.key === c.key ? -sort.dir : -1 }; renderTable(snap); });
+      th.append(b);
+      tr.append(th);
     }
-
-    // feed
-    const feed = $("#feed");
-    feed.replaceChildren();
-    if (!s.events.length) feed.append(el("li", "empty", "Sin movimientos aún."));
-    for (const e of s.events) {
-      const li = el("li");
-      const what = el("span", "feed__what");
-      // En ventas se muestra lo que de verdad se recibió: en un rug el precio puede verse alto
-      // pero el pool ya no tiene con qué pagarte.
-      const good = e.kind === "sell" && (e.reason.startsWith("tp") || e.reason === "trailing");
-      const cls = e.kind === "buy" ? "" : good ? "up" : "down";
-      const side = el("b", cls, e.kind === "buy" ? "COMPRA " : "VENDE ");
-      what.append(side, document.createTextNode(e.symbol || "?"));
-      const right = e.kind === "buy" ? money(e.usd) : `recibió ${money(e.usd)} · ${REASON[e.reason] || e.reason}`;
-      li.append(el("span", "feed__time", timeF.format(new Date(e.t * 1000))), what, el("span", cls, right));
-      feed.append(li);
+    thead.append(tr);
+    const tbody = el("tbody");
+    const data = rows(s).sort((a, b) => {
+      const va = a[sort.key], vb = b[sort.key];
+      return (typeof va === "string" ? va.localeCompare(vb) : va - vb) * sort.dir;
+    });
+    if (!data.length) {
+      const r = el("tr"), td = el("td", "empty", filter === "all" ? "Todavía no hay operaciones." : "Ninguna operación en este filtro.");
+      td.colSpan = COLUMNS.length;
+      r.append(td);
+      tbody.append(r);
     }
-
-    // tablas
-    const dexLink = (token, text) => {
-      const a = el("a", null, text);
-      a.href = "https://dexscreener.com/solana/" + encodeURIComponent(token);
-      a.target = "_blank";
-      a.rel = "noopener noreferrer";
-      return a;
-    };
-    const table = (node, head, rows) => {
-      node.replaceChildren();
-      const thead = el("thead");
-      const tr = el("tr");
-      head.forEach(([h, num]) => tr.append(el("th", num ? "num" : "", h)));
-      thead.append(tr);
-      const tbody = el("tbody");
-      if (!rows.length) {
-        const r = el("tr");
-        const td = el("td", "empty", "Nada todavía.");
-        td.colSpan = head.length;
+    const TAG = { open: ["Abierta", "tag--open"], win: ["Ganó", "tag--win"], loss: ["Perdió", "tag--loss"] };
+    for (const d of data.slice(0, 200)) {
+      const r = el("tr");
+      r.tabIndex = 0;
+      r.addEventListener("click", () => openTrade(d.token));
+      r.addEventListener("keydown", (e) => { if (e.key === "Enter") openTrade(d.token); });
+      const tag = el("span", "tag " + TAG[d.state][1], TAG[d.state][0]);
+      const cells = [
+        [el("span", null, d.symbol), "sym"], [tag], [at(d.time)], [ago(d.dur), "num"],
+        [mult(d.mult), "num " + tone(d.mult - 1)], [signed(d.pnl), "num " + tone(d.pnl)], [d.reason || "sigue abierta"],
+      ];
+      for (const [content, cls] of cells) {
+        const td = el("td", cls || "");
+        if (content instanceof Node) td.append(content); else td.textContent = content;
         r.append(td);
-        tbody.append(r);
       }
-      rows.forEach((cells) => {
-        const r = el("tr");
-        cells.forEach(([content, cls]) => {
-          const td = el("td", cls || "");
-          if (content instanceof Node) td.append(content); else td.textContent = content;
-          r.append(td);
-        });
-        tbody.append(r);
-      });
-      node.append(thead, tbody);
-    };
-
-    $("#openCaption").textContent = `${s.open.length} de 10 cupos · 4 % del libro cada una`;
-    table($("#openTable"), [["Token"], ["Desde"], ["Costo", 1], ["Vale", 1], ["Múltiplo", 1], ["Resultado", 1]],
-      s.open.map((p) => [
-        [dexLink(p.token, p.symbol), "sym"], [timeF.format(new Date(p.opened * 1000))],
-        [money(p.cost), "num"], [money(p.value), "num"], [mult(p.mult), "num " + tone(p.mult - 1)], [signed(p.pnl), "num " + tone(p.pnl)],
-      ]));
-    table($("#closedTable"), [["Token"], ["Cerró"], ["Motivo"], ["Múltiplo", 1], ["Resultado", 1]],
-      s.closed.map((c) => [
-        [dexLink(c.token, c.symbol), "sym"], [dayTimeF.format(new Date(c.closed * 1000))], [REASON[c.reason] || c.reason],
-        [mult(c.mult), "num " + tone(c.mult - 1)], [signed(c.pnl), "num " + tone(c.pnl)],
-      ]));
-
-    // honestidad
-    const truth = $("#truth");
-    truth.replaceChildren();
-    const item = (strong, rest) => { const li = el("li"); li.append(el("b", null, strong), document.createTextNode(" " + rest)); truth.append(li); };
-    if (s.worst_stop !== null) item(`El peor "stop −25 %" salió en ${mult(s.worst_stop)}.`, "Cuando una moneda se desploma entre dos consultas, el stop vende a lo que quede.");
-    const rugs = s.exit_reasons.liquidez || 0;
-    if (rugs) item(`${rugs} salidas porque se fue la liquidez.`, "Es la señal típica de un rug pull.");
-    item("Se cobra 1 % por lado + impacto de precio + 2 % de retraso al entrar.", "Los posts no cuentan comisiones ni deslizamiento.");
-    item("No muestra una billetera porque no hay una: es papel.", "Cualquier resultado real se puede verificar en la blockchain; pídelo siempre.");
-
-    const age = Date.now() / 1000 - s.updated;
-    const dot = $("#liveDot");
-    dot.className = "desk__dot " + (age < 120 ? "is-live" : "is-stale");
-    $("#updated").textContent = age < 120 ? `Actualizado ${timeF.format(new Date(s.updated * 1000))}` : `Sin datos nuevos desde ${dayTimeF.format(new Date(s.updated * 1000))} — ¿el simulador está corriendo?`;
-    renderCurve(s);
+      tbody.append(r);
+    }
+    table.append(thead, tbody);
   }
 
+  // ======================================================================= verdad
+  function renderTruth(s) {
+    const list = $("#truth");
+    list.replaceChildren();
+    const item = (strong, rest) => { const li = el("li"); li.append(el("b", null, strong), document.createTextNode(" " + rest)); list.append(li); };
+    if (s.worst_stop !== null) item(`El peor "stop de −25 %" vendió a ${mult(s.worst_stop)}.`, "Si la moneda se desploma entre dos consultas, el stop vende a lo que quede.");
+    const rugs = s.exit_reasons.liquidez || 0;
+    if (rugs) item(`${rugs} ${rugs === 1 ? "salida" : "salidas"} porque sacaron la liquidez.`, "Eso es un rug pull: el precio se ve bien, pero ya no hay quién te compre.");
+    item("Aquí se cobra 1 % por operación, el impacto en el precio y un 2 % por llegar tarde.", "Los posts no muestran comisiones ni deslizamiento.");
+    item("Ningún post enseña su billetera.", "Cualquier ganancia real en Solana se puede comprobar en la blockchain. Si no te la enseñan, no existe.");
+  }
+
+  // ======================================================================= cajón de detalle
+  const drawer = $("#drawer");
+  let lastFocus = null, drawerChart = null;
+  drawer.addEventListener("click", (e) => { if (e.target.closest("[data-close]")) closeDrawer(); });
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !drawer.hidden) closeDrawer(); });
+  function closeDrawer() {
+    drawer.hidden = true;
+    if (drawerChart) { drawerChart.remove(); drawerChart = null; }
+    lastFocus?.focus?.();
+  }
+  async function openTrade(token) {
+    radarTip.hidden = true;
+    lastFocus = document.activeElement;
+    let d;
+    try {
+      const res = await fetch("/api/meme/trade?token=" + encodeURIComponent(token), { cache: "no-store" });
+      d = await res.json();
+      if (!res.ok) throw new Error(d.error || res.status);
+    } catch (err) {
+      return;
+    }
+    const t = d.trade;
+    const isOpen = d.status === "open";
+    const last = t.last || t.entry;
+    const value = isOpen ? t.qty * last : 0;
+    const pnl = isOpen ? value + t.proceeds - t.cost : t.pnl;
+    $("#dTitle").textContent = t.symbol;
+    $("#dSub").textContent = isOpen ? `Abierta desde ${at(t.opened)}` : `Cerró ${at(t.closed)}: ${REASON[t.reason] || t.reason}`;
+    const stats = [
+      ["Puso", money(t.cost)],
+      [isOpen ? "Vale ahora" : "Recibió", money(isOpen ? value + t.proceeds : t.proceeds)],
+      ["Resultado", signed(pnl), tone(pnl)],
+      ["Precio de entrada", price(t.entry)],
+      [isOpen ? "Precio ahora" : "Último precio", price(last)],
+      ["Máximo visto", mult(t.peak / t.entry)],
+    ];
+    const dl = $("#dStats");
+    dl.replaceChildren();
+    for (const [k, v, cls] of stats) { const b = el("div"); b.append(el("dt", null, k), el("dd", cls || "", v)); dl.append(b); }
+    const ev = $("#dEvents");
+    ev.replaceChildren();
+    for (const e of d.events) {
+      const li = el("li");
+      const text = e.kind === "buy" ? `Compró ${money(e.usd)} a ${price(e.price)}` : `Vendió ${f0.format(e.frac * 100)} %: recibió ${money(e.usd)} (${REASON[e.reason] || e.reason})`;
+      li.append(el("span", e.kind === "buy" ? "buy" : isGoodExit(e.reason) ? "up" : "down", text), el("time", null, at(e.t)));
+      ev.append(li);
+    }
+    const links = $("#dLinks");
+    links.replaceChildren();
+    for (const [label, href] of [["Ver en DexScreener", "https://dexscreener.com/solana/" + encodeURIComponent(t.token)], ["Ver en Solscan", "https://solscan.io/token/" + encodeURIComponent(t.token)]]) {
+      const a = el("a", null, label);
+      a.href = href; a.target = "_blank"; a.rel = "noopener noreferrer";
+      links.append(a);
+    }
+    drawer.hidden = false;
+    drawer.querySelector(".drawer__panel").focus();
+    drawTradeChart(d, t);
+  }
+  function drawTradeChart(d, t) {
+    const LC = window.LightweightCharts;
+    const box = $("#dChart");
+    if (drawerChart) { drawerChart.remove(); drawerChart = null; }
+    box.replaceChildren();
+    if (!LC || d.path.length < 2) { box.append(el("p", "empty", "Todavía no hay suficientes precios para graficar.")); return; }
+    drawerChart = LC.createChart(box, {
+      autoSize: true,
+      layout: { background: { type: LC.ColorType.Solid, color: "transparent" }, textColor: cssVar("--muted"), fontFamily: "Geist, system-ui", fontSize: 11 },
+      grid: { vertLines: { visible: false }, horzLines: { color: cssVar("--line") } },
+      rightPriceScale: { borderVisible: false },
+      timeScale: { borderColor: cssVar("--line"), timeVisible: true, secondsVisible: false },
+      handleScale: { mouseWheel: false },
+    });
+    const up = (t.last || t.entry) >= t.entry;
+    const series = drawerChart.addSeries(LC.LineSeries, {
+      color: up ? cssVar("--gain") : cssVar("--loss"), lineWidth: 2, priceLineVisible: false,
+      priceFormat: { type: "custom", minMove: 1e-12, formatter: (v) => price(v) },
+      // Que siempre se vean la entrada y el stop, aunque el precio esté lejos.
+      autoscaleInfoProvider: (orig) => {
+        const r = orig();
+        if (!r) return r;
+        r.priceRange.minValue = Math.min(r.priceRange.minValue, t.entry * 0.7);
+        r.priceRange.maxValue = Math.max(r.priceRange.maxValue, t.entry * 1.08);
+        return r;
+      },
+    });
+    const seen = new Set();
+    const pts = [];
+    for (const p of d.path) {
+      const time = Math.floor(p.t) + TZ;
+      if (seen.has(time)) continue;
+      seen.add(time);
+      pts.push({ time, value: p.p });
+    }
+    series.setData(pts);
+    const line = (mu, color, title, style) => series.createPriceLine({ price: t.entry * mu, color, lineWidth: 1, lineStyle: style, axisLabelVisible: true, title });
+    line(1, cssVar("--muted"), "entrada", LC.LineStyle.Solid);
+    line(0.75, cssVar("--loss"), "stop", LC.LineStyle.Dashed);
+    line(2, cssVar("--gain"), "2x", LC.LineStyle.Dashed);
+    line(3, cssVar("--gain"), "3x", LC.LineStyle.Dashed);
+    drawerChart.timeScale().fitContent();
+  }
+
+  // ======================================================================= ciclo
+  const seenBuys = new Set();
+  let firstLoad = true;
   async function tick() {
+    let s;
     try {
       const res = await fetch("/api/meme", { cache: "no-store" });
-      const s = await res.json();
-      if (!s.ready) { $("#hSub").textContent = "El simulador todavía no ha guardado datos."; return; }
-      render(s);
+      s = await res.json();
     } catch (err) {
-      $("#updated").textContent = "No se pudo leer el simulador.";
+      $("#updated").textContent = "No se pudo leer el simulador. Revisa que Solbot siga corriendo.";
+      $("#pulse").className = "pulse is-stale";
+      return;
     }
+    if (!s.ready) { $("#sieveTitle").textContent = "El simulador todavía no ha guardado datos."; return; }
+    snap = s;
+    const newBuys = s.events.filter((e) => e.kind === "buy" && !seenBuys.has(`${e.t}-${e.token}`));
+    newBuys.forEach((e) => seenBuys.add(`${e.t}-${e.token}`));
+    sieve.feed(s.funnel, firstLoad ? newBuys.slice(0, 3) : newBuys);
+    firstLoad = false;
+    renderHero(s);
+    renderGates(s);
+    renderRadar(s);
+    renderTape(s);
+    renderCurve(s);
+    renderTable(s);
+    renderTruth(s);
+    const age = Date.now() / 1000 - s.updated;
+    $("#pulse").className = "pulse " + (age < 120 ? "is-live" : "is-stale");
+    $("#updated").textContent = age < 120 ? `En vivo, ${hm.format(new Date(s.updated * 1000))}` : `Sin datos nuevos desde ${dhm.format(new Date(s.updated * 1000))}. ¿El simulador está corriendo?`;
   }
 
-  tick();
-  setInterval(tick, 15000);
+  window.addEventListener("resize", () => snap && renderRadar(snap));
+  window.addEventListener("load", () => {
+    sieve.init();
+    tick();
+    setInterval(tick, 15000);
+  });
 })();

@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import re
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -43,6 +44,7 @@ POOL_AUTHORITIES = {
 }
 GECKO = "https://api.geckoterminal.com/api/v2/networks/solana"
 DEX = "https://api.dexscreener.com"
+MINT_RE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")  # base58: también evita rutas raras en disco
 
 
 @dataclass(frozen=True)
@@ -219,6 +221,15 @@ class Sim:
             f.write(json.dumps({"t": time.time(), "equity": self.book.equity(), "cash": self.book.cash,
                                 "open": len(self.book.positions)}) + "\n")
 
+    def record_price(self, token: str, now: float, price: float, liq: float) -> None:
+        """Historial de precio de cada operación (para la gráfica del dashboard)."""
+        if not MINT_RE.match(token):
+            return
+        folder = self.folder / "paths"
+        folder.mkdir(exist_ok=True)
+        with open(folder / f"{token}.jsonl", "a") as f:
+            f.write(json.dumps({"t": round(now, 1), "p": price, "l": round(liq)}) + "\n")
+
     def count(self, key: str) -> None:
         self.funnel[key] = self.funnel.get(key, 0) + 1
 
@@ -336,6 +347,7 @@ class Sim:
                 self.count("sin_cupo")
                 continue
             p = self.book.open(pair, now, self.rules)
+            self.record_price(token, now, p.entry, p.entry_liq)
             self.count("compras")
             self.event(kind="buy", token=token, symbol=p.symbol, price=p.entry, usd=p.cost,
                        liq=p.entry_liq, age_min=(now - pair["pairCreatedAt"] / 1000) / 60)
@@ -353,6 +365,7 @@ class Sim:
             price = float(pair.get("priceUsd") or 0)
             liq = float((pair.get("liquidity") or {}).get("usd") or 0)
             p.last = price
+            self.record_price(token, now, price, liq)
             for frac, reason in step_position(p, price, liq, now, self.rules):
                 got = self.book.sell(p, frac, price, liq, now, reason, self.rules)
                 self.event(kind="sell", token=token, symbol=p.symbol, price=price, frac=frac, usd=got,
@@ -365,13 +378,14 @@ class Sim:
         last_discover = 0.0
         while True:
             try:
-                if time.time() - last_discover >= 60:
+                discovered = time.time() - last_discover >= 60
+                if discovered:
                     self.discover()
                     self.evaluate()
                     last_discover = time.time()
-                    self.manage()
-                    self.record_equity()
                 self.manage()
+                if discovered:
+                    self.record_equity()
                 self.save()
             except Exception as exc:
                 log.exception("vuelta fallida: %s", exc)
@@ -406,7 +420,8 @@ def snapshot(folder: Path, start_cash: float = 100.0) -> dict:
         value = p["qty"] * last
         open_positions.append({"symbol": p["symbol"], "token": p["token"], "cost": p["cost"], "value": value,
                                "mult": last / p["entry"], "pnl": value + p["proceeds"] - p["cost"],
-                               "opened": p["opened"], "steps": p["steps_done"]})
+                               "opened": p["opened"], "steps": p["steps_done"], "peak_mult": p["peak"] / p["entry"],
+                               "liq": p["entry_liq"], "proceeds": p["proceeds"]})
     reasons: dict[str, int] = {}
     for c in closed:
         reasons[c["reason"]] = reasons.get(c["reason"], 0) + 1
@@ -436,6 +451,28 @@ def snapshot(folder: Path, start_cash: float = 100.0) -> dict:
         "events": list(reversed(_tail_jsonl(folder / "events.jsonl", 60))),
         "curve": curve,
     }
+
+
+def trade_detail(folder: Path, token: str, max_points: int = 600) -> dict:
+    """Historial de precio y registro de una operación (abierta o cerrada)."""
+    if not MINT_RE.match(token or ""):
+        raise ValueError("Token inválido.")
+    state = json.loads((folder / "state.json").read_text()) if (folder / "state.json").exists() else {}
+    record = (state.get("positions") or {}).get(token)
+    status_ = "open" if record else None
+    if record is None:
+        record = next((c for c in reversed(state.get("closed") or []) if c["token"] == token), None)
+        status_ = "closed" if record else None
+    if record is None:
+        raise ValueError("No hay operación con ese token.")
+    path = _tail_jsonl(folder / "paths" / f"{token}.jsonl", 100_000)
+    if len(path) > max_points:  # se reduce para la gráfica, conservando el último punto
+        step = len(path) / max_points
+        path = [path[int(i * step)] for i in range(max_points - 1)] + [path[-1]]
+    events = [e for e in _tail_jsonl(folder / "events.jsonl", 20_000) if e.get("token") == token]
+    keep = ("symbol", "token", "pool", "entry", "qty", "cost", "opened", "peak", "entry_liq", "steps_done",
+            "proceeds", "last", "closed", "reason", "pnl", "mult")
+    return {"status": status_, "trade": {k: record[k] for k in keep if k in record}, "path": path, "events": events}
 
 
 def status(folder: Path) -> str:
