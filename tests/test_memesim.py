@@ -130,3 +130,30 @@ def test_book_respects_max_open():
     for i in range(RULES.max_open):
         book.open(pair(baseToken={"address": f"M{i}", "symbol": "X"}), NOW, RULES)
     assert not book.can_open(RULES)
+
+
+# ---- datos del dashboard --------------------------------------------------------------------
+
+def test_snapshot_summarizes_files(tmp_path):
+    import json
+
+    from solbot.memesim import snapshot
+
+    assert snapshot(tmp_path) == {"ready": False}
+    closed = [
+        {"symbol": "A", "token": "a", "reason": "stop", "pnl": -3.0, "mult": 0.25, "cost": 4.0, "opened": 1, "closed": 2},
+        {"symbol": "B", "token": "b", "reason": "trailing", "pnl": 5.0, "mult": 2.25, "cost": 4.0, "opened": 1, "closed": 3},
+    ]
+    position = {"token": "c", "symbol": "C", "pool": "P", "entry": 1.0, "qty": 4.0, "cost": 4.0, "opened": 5.0,
+                "peak": 2.0, "entry_liq": 1.0, "steps_done": 0, "proceeds": 0.0, "last": 2.0}
+    (tmp_path / "state.json").write_text(json.dumps({
+        "cash": 90.0, "start": 0.0, "saved": 10.0, "equity": 98.0, "closed": closed, "positions": {"c": position},
+        "funnel": {"vistos": 50, "compras": 3, "rechazo_edad": 20, "descartados_sin_liquidez": 10}, "checked": {}}))
+    (tmp_path / "equity.jsonl").write_text('{"t": 1, "equity": 100}\n{"t": 2, "equity": 98}\n{"t": 3, "equ')
+    snap = snapshot(tmp_path)
+    assert snap["wins"] == 1 and snap["losses"] == 1
+    assert snap["rejected"] == 30
+    assert snap["worst_stop"] == 0.25
+    assert snap["open"][0]["mult"] == 2.0 and snap["open"][0]["pnl"] == 4.0
+    assert [c["symbol"] for c in snap["closed"]] == ["B", "A"]
+    assert len(snap["curve"]) == 2  # la línea a medio escribir se ignora

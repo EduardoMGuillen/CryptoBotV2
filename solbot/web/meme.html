@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="es" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark light">
+<title>Meme Desk</title>
+<link rel="icon" href="/static/icon.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;700&display=swap">
+<link rel="stylesheet" href="/static/app.css">
+<link rel="stylesheet" href="/static/meme.css">
+<script src="/static/vendor/lightweight-charts.standalone.production.js" defer></script>
+<script src="/static/meme.js" defer></script>
+</head>
+<body class="meme">
+<main class="desk">
+  <header class="desk__top">
+    <div class="desk__brand">
+      <span class="desk__dot" id="liveDot"></span>
+      <span class="desk__name">MEME DESK</span>
+      <span class="chip chip--live">PAPEL · sin dinero real</span>
+    </div>
+    <div class="desk__meta">
+      <span id="updated">Conectando…</span>
+      <a class="btn btn--small" href="/">← Solbot</a>
+    </div>
+  </header>
+
+  <section class="headline" aria-live="polite">
+    <div class="headline__line"><span id="hStart">$100.00</span><span class="headline__arrow">→</span><span id="hNow">—</span></div>
+    <div class="headline__sub" id="hSub">Esperando datos del simulador…</div>
+  </section>
+
+  <section class="stats" id="stats"></section>
+
+  <section class="grid-desk">
+    <article class="card card--curve">
+      <div class="card__head">
+        <div><div class="card__title">Libro</div><div class="card__caption">Valor del libro cada minuto (posiciones abiertas al último precio).</div></div>
+      </div>
+      <div class="curve" id="curve"></div>
+    </article>
+
+    <article class="card card--funnel">
+      <div class="card__head"><div><div class="card__title">Embudo</div><div class="card__caption">Por qué se rechazó cada moneda.</div></div></div>
+      <ul class="funnel" id="funnel"></ul>
+    </article>
+
+    <article class="card card--feed">
+      <div class="card__head"><div><div class="card__title">En vivo</div><div class="card__caption">Últimas compras y ventas.</div></div></div>
+      <ol class="feed" id="feed"></ol>
+    </article>
+
+    <article class="card card--open">
+      <div class="card__head"><div><div class="card__title">Posiciones abiertas</div><div class="card__caption" id="openCaption"></div></div></div>
+      <div class="table-scroll"><table class="table" id="openTable"></table></div>
+    </article>
+
+    <article class="card card--closed">
+      <div class="card__head"><div><div class="card__title">Operaciones cerradas</div><div class="card__caption">Las 100 más recientes.</div></div></div>
+      <div class="table-scroll"><table class="table" id="closedTable"></table></div>
+    </article>
+
+    <article class="card card--truth">
+      <div class="card__head"><div><div class="card__title">Lo que los posts no muestran</div></div></div>
+      <ul class="truth" id="truth"></ul>
+    </article>
+  </section>
+</main>
+</body>
+</html>

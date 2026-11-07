@@ -214,6 +214,11 @@ class Sim:
         with open(self.folder / "events.jsonl", "a") as f:
             f.write(json.dumps({"t": time.time(), **kw}) + "\n")
 
+    def record_equity(self) -> None:
+        with open(self.folder / "equity.jsonl", "a") as f:
+            f.write(json.dumps({"t": time.time(), "equity": self.book.equity(), "cash": self.book.cash,
+                                "open": len(self.book.positions)}) + "\n")
+
     def count(self, key: str) -> None:
         self.funnel[key] = self.funnel.get(key, 0) + 1
 
@@ -364,11 +369,73 @@ class Sim:
                     self.discover()
                     self.evaluate()
                     last_discover = time.time()
+                    self.manage()
+                    self.record_equity()
                 self.manage()
                 self.save()
             except Exception as exc:
                 log.exception("vuelta fallida: %s", exc)
             time.sleep(15)
+
+
+def _tail_jsonl(path: Path, limit: int) -> list[dict]:
+    if not path.exists():
+        return []
+    out = []
+    for line in path.read_text().splitlines()[-limit:]:
+        try:
+            out.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue  # línea a medio escribir
+    return out
+
+
+def snapshot(folder: Path, start_cash: float = 100.0) -> dict:
+    """Todo lo que necesita el dashboard, desde los archivos del simulador (solo lectura)."""
+    path = folder / "state.json"
+    if not path.exists():
+        return {"ready": False}
+    s = json.loads(path.read_text())
+    closed = s["closed"]
+    wins = [c for c in closed if c["pnl"] > 0]
+    funnel = s["funnel"]
+    rejected = sum(v for k, v in funnel.items() if k.startswith(("rechazo_", "descartados_")))
+    open_positions = []
+    for p in s["positions"].values():
+        last = p.get("last") or p["entry"]
+        value = p["qty"] * last
+        open_positions.append({"symbol": p["symbol"], "token": p["token"], "cost": p["cost"], "value": value,
+                               "mult": last / p["entry"], "pnl": value + p["proceeds"] - p["cost"],
+                               "opened": p["opened"], "steps": p["steps_done"]})
+    reasons: dict[str, int] = {}
+    for c in closed:
+        reasons[c["reason"]] = reasons.get(c["reason"], 0) + 1
+    worst_stop = min((c["mult"] for c in closed if c["reason"] == "stop"), default=None)
+    curve = [{"t": e["t"], "equity": e["equity"]} for e in _tail_jsonl(folder / "equity.jsonl", 20_000)]
+    return {
+        "ready": True,
+        "start_cash": start_cash,
+        "equity": s["equity"],
+        "cash": s["cash"],
+        "started": s["start"],
+        "updated": s["saved"],
+        "funnel": funnel,
+        "seen": funnel.get("vistos", 0),
+        "bought": funnel.get("compras", 0),
+        "rejected": rejected,
+        "wins": len(wins),
+        "losses": len(closed) - len(wins),
+        "realized": sum(c["pnl"] for c in closed),
+        "best": max(closed, key=lambda c: c["pnl"], default=None),
+        "worst": min(closed, key=lambda c: c["pnl"], default=None),
+        "worst_stop": worst_stop,
+        "exit_reasons": reasons,
+        "open": sorted(open_positions, key=lambda p: -p["opened"]),
+        "closed": [{k: c[k] for k in ("symbol", "token", "reason", "pnl", "mult", "cost", "opened", "closed")}
+                   for c in reversed(closed[-100:])],
+        "events": list(reversed(_tail_jsonl(folder / "events.jsonl", 60))),
+        "curve": curve,
+    }
 
 
 def status(folder: Path) -> str:

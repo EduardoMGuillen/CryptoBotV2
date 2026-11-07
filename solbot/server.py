@@ -18,6 +18,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
+from . import memesim
+
 WEB = Path(__file__).parent / "web"
 log = logging.getLogger("solbot")
 
@@ -32,6 +34,7 @@ GET_ROUTES = {
     "/api/backtest": lambda app, q: app.backtest(),
     "/api/chart": lambda app, q: app.chart(int(q.get("days", ["365"])[0])),
     "/api/tickers": lambda app, q: app.tickers(),
+    "/api/meme": lambda app, q: memesim.snapshot(app.cfg.data_dir / "meme"),
 }
 POST_ROUTES = {
     "/api/bot/start": lambda app, body: app.start(confirm=body.get("confirm")),
@@ -95,6 +98,8 @@ def make_handler(app, token: str):
             if url.path in ("/", "/index.html"):
                 html = (WEB / "index.html").read_text(encoding="utf-8").replace("{{TOKEN}}", token)
                 return self._send(200, html.encode(), "text/html; charset=utf-8")
+            if url.path in ("/meme", "/meme/"):
+                return self._send(200, (WEB / "meme.html").read_bytes(), "text/html; charset=utf-8")
             if url.path.startswith("/static/"):
                 return self._static(url.path[len("/static/"):])
             route = GET_ROUTES.get(url.path)
