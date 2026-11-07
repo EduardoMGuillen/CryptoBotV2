@@ -452,6 +452,7 @@ class Sim:
             self.desks.append(Desk(name, vfolder, vrules, TxSim(self.quote, self.sol_price, vrules), start_cash))
         self.checked: dict[str, float] = self.desks[0].extra.get("checked", {})
         self.waiting: dict[str, set[str]] = {}  # token -> mesas que esperan a que tenga más edad
+        self._last_manage = 0.0
 
     # compatibilidad: la mesa principal
     @property
@@ -669,6 +670,9 @@ class Sim:
                 del self.watch[token]
                 self.count("descartados_sin_liquidez")
         for token, pair in pairs.items():
+            # Revisar holders y cotizar compras tarda; un bot real sigue vigilando sus posiciones.
+            if time.time() - self._last_manage >= 5:
+                self.manage()
             retry = token in self.waiting  # ya pasó los filtros antes; una mesa espera su edad mínima
             desks = [d for d in self.desks if d.name in self.waiting.get(token, ())] if retry else self.desks
             count = (lambda key: [d.count(key) for d in desks]) if retry else self.count
@@ -705,6 +709,7 @@ class Sim:
                 self.waiting.pop(token, None)
 
     def manage(self) -> None:
+        self._last_manage = time.time()
         held = self.held()
         if not held:
             return

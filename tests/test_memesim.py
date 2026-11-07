@@ -337,7 +337,7 @@ def test_min_age_waits_then_buys_when_old_enough(tmp_path):
     sim.decimals["MINT"] = 6
     young = pair(pairCreatedAt=(NOW - 10 * 60) * 1000)
     sim.watch = {"MINT": NOW}
-    sim.best_pairs = lambda tokens: {"MINT": young} if "MINT" in tokens else {}
+    sim.best_pairs = lambda tokens, prefer=None: {"MINT": young} if "MINT" in tokens else {}
     import solbot.memesim as m
     real_time = m.time.time
     m.time.time = lambda: NOW
