@@ -26,10 +26,12 @@ RPC de Solana (holders y autoridades del mint).
 from __future__ import annotations
 
 import argparse
+import datetime
 import json
 import logging
 import random
 import re
+import tarfile
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -662,8 +664,12 @@ class Sim:
     def run(self) -> None:
         log.info("memesim en papel: %s", ", ".join(f"{d.name} {d.book.equity():.2f} USD" for d in self.desks))
         last_discover = 0.0
+        last_backup = time.time()
         while True:
             try:
+                if time.time() - last_backup >= 3600:
+                    last_backup = time.time()
+                    log.info("respaldo: %s", backup(self.folder, self.folder.parent / "backups"))
                 discovered = time.time() - last_discover >= 60
                 if discovered:
                     self.discover()
@@ -676,6 +682,20 @@ class Sim:
             except Exception as exc:
                 log.exception("vuelta fallida: %s", exc)
             time.sleep(5)
+
+
+def backup(folder: Path, dest: Path, keep: int = 48, now: datetime.datetime | None = None) -> Path:
+    """Copia comprimida de toda la carpeta del simulador; conserva las `keep` más recientes."""
+    dest.mkdir(parents=True, exist_ok=True)
+    stamp = (now or datetime.datetime.now()).strftime("%Y%m%d-%H%M")
+    target = dest / f"meme-{stamp}.tar.gz"
+    tmp = target.with_suffix(".tmp")
+    with tarfile.open(tmp, "w:gz") as tar:
+        tar.add(folder, arcname=folder.name, filter=lambda ti: None if ti.name.endswith(".tmp") else ti)
+    tmp.replace(target)
+    for old in sorted(dest.glob("meme-*.tar.gz"))[:-keep]:
+        old.unlink()
+    return target
 
 
 def _tail_jsonl(path: Path, limit: int) -> list[dict]:

@@ -391,3 +391,21 @@ def test_price_spike_needs_confirmation(tmp_path):
     assert p.last == 0.001 and sold == [] and desk.funnel["precio_sospechoso"] == 1
     desk.manage(spiked, NOW + 10, lambda t: 6)  # se repite: se acepta
     assert p.last == 0.45 and sold
+
+
+def test_backup_rotates(tmp_path):
+    import datetime
+    import tarfile
+
+    from solbot.memesim import backup
+
+    folder = tmp_path / "meme"
+    folder.mkdir()
+    (folder / "state.json").write_text("{}")
+    (folder / "state.tmp").write_text("x")
+    dest = tmp_path / "backups"
+    for h in range(4):
+        path = backup(folder, dest, keep=2, now=datetime.datetime(2026, 11, 7, h, 0))
+    assert sorted(p.name for p in dest.glob("*.tar.gz")) == ["meme-20261107-0200.tar.gz", "meme-20261107-0300.tar.gz"]
+    names = tarfile.open(path).getnames()
+    assert "meme/state.json" in names and "meme/state.tmp" not in names
