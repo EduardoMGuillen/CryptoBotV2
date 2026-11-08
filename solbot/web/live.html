@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<meta name="theme-color" content="#120b1f">
+<title>Meme Desk en vivo</title>
+<link rel="icon" href="/static/icon.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wdth,wght@12..96,75..100,400..800&family=Figtree:wght@400;500;600;700&display=swap">
+<link rel="stylesheet" href="/static/live.css">
+<script src="/static/vendor/lightweight-charts.standalone.production.js" defer></script>
+<script src="/static/live.js" defer></script>
+</head>
+<body>
+<canvas id="fx" class="fx" aria-hidden="true"></canvas>
+<div class="page">
+  <header class="top">
+    <a class="brand" href="/meme" aria-label="Meme Desk">
+      <svg viewBox="0 0 32 32" aria-hidden="true"><path d="M4 6h24l-9 10v9l-6 3V16z"/></svg>
+      <span>Meme Desk</span>
+    </a>
+    <span class="paper" title="Los simuladores nunca firman ni envían órdenes">Papel</span>
+    <span class="live" id="live"><i aria-hidden="true"></i><span id="liveText">Conectando</span></span>
+    <button class="sound" id="sound" aria-pressed="false" title="Sonido y vibración al cerrar operaciones">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9v6h4l5 4V5L8 9H4z"/><path class="sound__waves" d="M16 8.5a5 5 0 0 1 0 7M18.5 6a8.5 8.5 0 0 1 0 12"/></svg>
+      <span class="sr">Sonido</span>
+    </button>
+  </header>
+
+  <div class="grid">
+    <div class="col col--main">
+      <section class="hero" aria-labelledby="heroLabel">
+        <p class="hero__label" id="heroLabel">Todas las mesas en papel</p>
+        <div class="hero__value" id="total" aria-live="polite">—</div>
+        <p class="hero__sub" id="totalSub"></p>
+        <dl class="today" id="today"></dl>
+        <a class="real" id="real" href="/" hidden>
+          <span class="real__dot" aria-hidden="true"></span>
+          <span class="real__body">
+            <span class="real__title">Dinero real</span>
+            <span class="real__value" id="realValue">—</span>
+          </span>
+          <span class="real__meta" id="realMeta"></span>
+        </a>
+      </section>
+
+      <section class="race" aria-labelledby="raceTitle">
+        <div class="head">
+          <h2 id="raceTitle">La carrera</h2>
+          <p>Cada estrategia empezó con $100. Toca una para ver su curva.</p>
+        </div>
+        <ol class="race__list" id="race"></ol>
+      </section>
+
+      <section class="opens" aria-labelledby="opensTitle">
+        <div class="head">
+          <h2 id="opensTitle">Abiertas ahora</h2>
+          <p id="opensSub">La barra va del stop a la meta; el punto es el precio actual.</p>
+        </div>
+        <div class="opens__list" id="opens"></div>
+      </section>
+
+      <section class="curve" aria-labelledby="curveTitle">
+        <div class="head head--row">
+          <div>
+            <h2 id="curveTitle">Curva</h2>
+            <p id="curveSub">Valor de la mesa, con posiciones abiertas a su último precio.</p>
+          </div>
+          <div class="seg" id="ranges" role="group" aria-label="Rango">
+            <button data-h="1">1 h</button>
+            <button data-h="6">6 h</button>
+            <button data-h="24">24 h</button>
+            <button data-h="0" aria-pressed="true">Todo</button>
+          </div>
+        </div>
+        <div class="curve__box" id="curve"></div>
+      </section>
+    </div>
+
+    <aside class="col col--feed" aria-labelledby="feedTitle">
+      <div class="feed">
+        <div class="head head--row">
+          <div>
+            <h2 id="feedTitle">Lo que está pasando</h2>
+            <p>Compras y ventas de todas las mesas. Toca una para ver la gráfica.</p>
+          </div>
+        </div>
+        <ol class="feed__list" id="feed"></ol>
+        <button class="more" id="more" aria-expanded="false">Ver más movimientos</button>
+      </div>
+    </aside>
+  </div>
+
+  <footer class="foot">
+    <p>Simulación con precios y cotizaciones reales de Jupiter. Ninguna operación de esta pantalla usa dinero real.</p>
+    <a href="/meme/clasico">Ver la pantalla anterior</a>
+  </footer>
+</div>
+
+<div class="sheet" id="sheet" hidden>
+  <div class="sheet__backdrop" data-close></div>
+  <article class="sheet__panel" role="dialog" aria-modal="true" aria-labelledby="sTitle" tabindex="-1">
+    <header class="sheet__head">
+      <div>
+        <h3 id="sTitle">—</h3>
+        <p id="sSub"></p>
+      </div>
+      <button class="sheet__close" data-close aria-label="Cerrar">×</button>
+    </header>
+    <dl class="sheet__stats" id="sStats"></dl>
+    <div class="sheet__chart" id="sChart"></div>
+    <p class="sheet__links" id="sLinks"></p>
+  </article>
+</div>
+</body>
+</html>

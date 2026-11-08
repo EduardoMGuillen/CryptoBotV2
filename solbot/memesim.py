@@ -867,6 +867,69 @@ def variants_summary(root: Path) -> list[dict]:
     return out
 
 
+RUG_REASONS = ("liquidez", "sin_ruta")
+
+
+def _desk_names(root: Path) -> list[str]:
+    return [ROOT_VARIANT] + sorted(p.name for p in (root / "variants").glob("*") if p.is_dir() and VARIANT_RE.match(p.name))
+
+
+def feed(root: Path, limit: int = 80, since: float | None = None) -> dict:
+    """Lo que pasa en todas las mesas a la vez (pantalla "En vivo"): últimos movimientos, posiciones
+    abiertas y el resumen de hoy (desde `since`, por defecto la medianoche local)."""
+    if since is None:
+        since = datetime.datetime.now().replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+    events, opened, today = [], [], {"wins": 0, "losses": 0, "rugs": 0, "pnl": 0.0}
+    for name in _desk_names(root):
+        folder = variant_folder(root, name)
+        path = folder / "state.json"
+        if not path.exists():
+            continue
+        st = json.loads(path.read_text())
+        closed = st.get("closed") or []
+        for c in closed:
+            if c.get("closed", 0) >= since:
+                today["pnl"] += c["pnl"]
+                today["wins" if c["pnl"] > 0 else "losses"] += 1
+                today["rugs"] += c["reason"] in RUG_REASONS
+        for e in _tail_jsonl(folder / "events.jsonl", limit):
+            e = {**e, "desk": name}
+            if e.get("kind") == "fail":
+                e["tone"] = "fail"
+            elif e.get("kind") == "buy":
+                e["tone"] = "buy"
+            else:
+                # El cierre se anota al empezar la vuelta y el evento tras la transacción (latencia,
+                # reintentos): se toma el cierre más cercano del mismo token, hasta 2 min.
+                near = [c for c in closed if c["token"] == e.get("token") and abs(c.get("closed", 0) - e["t"]) < 120]
+                match = min(near, key=lambda c: abs(c["closed"] - e["t"])) if near else None
+                if match is not None:
+                    e["pnl"] = match["pnl"]
+                reason = e.get("reason", "")
+                if reason in RUG_REASONS:
+                    e["tone"] = "rug"
+                elif reason.startswith("tp") or (match is not None and match["pnl"] > 0):
+                    e["tone"] = "win"
+                else:
+                    e["tone"] = "loss"
+            events.append(e)
+        rules = st.get("rules") or {}
+        targets = rules.get("targets") or []
+        if name.startswith("acc_"):  # acciones: salen por señal diaria, no por stop ni meta
+            rules, targets = {}, []
+        for pos in (st.get("positions") or {}).values():
+            last = pos.get("last") or pos["entry"]
+            step = pos.get("steps_done", 0)
+            opened.append({"desk": name, "symbol": pos["symbol"], "token": pos["token"], "opened": pos["opened"],
+                           "cost": pos["cost"], "value": pos["qty"] * last, "mult": last / pos["entry"],
+                           "pnl": pos["qty"] * last + pos.get("proceeds", 0.0) - pos["cost"],
+                           "stop": 1 + rules["stop"] if "stop" in rules and step == 0 else None,
+                           "target": targets[step][0] if step < len(targets) else None})
+    events.sort(key=lambda e: -e["t"])
+    opened.sort(key=lambda o: -o["opened"])
+    return {"events": events[:limit], "open": opened, "today": today}
+
+
 def trade_detail(folder: Path, token: str, max_points: int = 600) -> dict:
     """Historial de precio y registro de una operación (abierta o cerrada)."""
     if not MINT_RE.match(token or ""):

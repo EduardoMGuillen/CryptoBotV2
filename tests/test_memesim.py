@@ -499,3 +499,48 @@ def test_default_desk_still_rejects_pairs_older_than_six_hours(tmp_path):
                                             rng=lambda: 0.99, sleep=lambda s: None))
     desk.try_buy(pair(pairCreatedAt=(NOW - 7 * 3600) * 1000), NOW, lambda t: 6, is_copy=False)
     assert desk.funnel["rechazo_edad"] == 1 and desk.book.positions == {}
+
+
+def test_feed_merges_desks_and_labels_outcomes(tmp_path):
+    import json
+
+    from solbot.memesim import feed
+
+    def desk(folder, events, closed, positions=None):
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / "events.jsonl").write_text("".join(json.dumps(e) + "\n" for e in events))
+        (folder / "state.json").write_text(json.dumps({
+            "cash": 90.0, "start": 0.0, "saved": 1.0, "equity": 95.0, "closed": closed,
+            "positions": positions or {}, "funnel": {}, "rules": {"stop": -0.2, "targets": [[1.5, 0.5]]}}))
+
+    pos = {"token": "c", "symbol": "C", "pool": "P", "entry": 1.0, "qty": 4.0, "cost": 4.0, "opened": 5.0,
+           "peak": 2.0, "entry_liq": 1.0, "steps_done": 0, "proceeds": 0.0, "last": 1.25}
+    desk(tmp_path, [{"t": 10, "kind": "buy", "token": "a", "symbol": "A", "usd": 5.0},
+                    {"t": 30, "kind": "sell", "token": "a", "symbol": "A", "usd": 0.0, "reason": "liquidez", "mult": 0.1}],
+         [{"token": "a", "symbol": "A", "reason": "liquidez", "pnl": -5.0, "closed": 30.5, "opened": 10}],
+         {"c": pos})
+    desk(tmp_path / "variants" / "otra", [
+        {"t": 20, "kind": "sell", "token": "b", "symbol": "B", "usd": 7.0, "reason": "trailing", "mult": 1.4},
+        {"t": 25, "kind": "fail", "side": "buy", "token": "d", "symbol": "D", "note": "fallo"}],
+         [{"token": "b", "symbol": "B", "reason": "trailing", "pnl": 2.0, "closed": 20.2, "opened": 1}])
+    out = feed(tmp_path, limit=10, since=0)
+    assert [(e["desk"], e["symbol"], e["tone"]) for e in out["events"]] == [
+        ("principal", "A", "rug"), ("otra", "D", "fail"), ("otra", "B", "win"), ("principal", "A", "buy")]
+    assert out["events"][0]["pnl"] == -5.0 and out["events"][2]["pnl"] == 2.0
+    assert out["today"] == {"wins": 1, "losses": 1, "rugs": 1, "pnl": -3.0}
+    o = out["open"][0]
+    assert o["desk"] == "principal" and o["mult"] == 1.25 and o["stop"] == 0.8 and o["target"] == 1.5
+    assert len(feed(tmp_path, limit=2, since=0)["events"]) == 2
+
+
+def test_feed_matches_close_recorded_seconds_before_the_sell_event(tmp_path):
+    import json
+
+    from solbot.memesim import feed
+
+    (tmp_path / "events.jsonl").write_text(json.dumps({"t": 105.3, "kind": "sell", "token": "a", "symbol": "A",
+                                                       "usd": 0.0, "reason": "liquidez"}) + "\n")
+    (tmp_path / "state.json").write_text(json.dumps({"closed": [{"token": "a", "symbol": "A", "reason": "liquidez",
+                                                                 "pnl": -3.0, "closed": 100.0, "opened": 1}],
+                                                     "positions": {}}))
+    assert feed(tmp_path, since=0)["events"][0]["pnl"] == -3.0

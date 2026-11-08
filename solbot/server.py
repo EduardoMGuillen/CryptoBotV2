@@ -35,6 +35,7 @@ GET_ROUTES = {
     "/api/chart": lambda app, q: app.chart(int(q.get("days", ["365"])[0])),
     "/api/tickers": lambda app, q: app.tickers(),
     "/api/meme": lambda app, q: memesim.snapshot(memesim.variant_folder(app.cfg.data_dir / "meme", q.get("v", [""])[0])),
+    "/api/meme/feed": lambda app, q: memesim.feed(app.cfg.data_dir / "meme"),
     "/api/meme/variants": lambda app, q: memesim.variants_summary(app.cfg.data_dir / "meme"),
     "/api/meme/trade": lambda app, q: memesim.trade_detail(
         memesim.variant_folder(app.cfg.data_dir / "meme", q.get("v", [""])[0]), q.get("token", [""])[0]),
@@ -102,6 +103,8 @@ def make_handler(app, token: str):
                 html = (WEB / "index.html").read_text(encoding="utf-8").replace("{{TOKEN}}", token)
                 return self._send(200, html.encode(), "text/html; charset=utf-8")
             if url.path in ("/meme", "/meme/"):
+                return self._send(200, (WEB / "live.html").read_bytes(), "text/html; charset=utf-8")
+            if url.path in ("/meme/clasico", "/meme/clasico/"):
                 return self._send(200, (WEB / "meme.html").read_bytes(), "text/html; charset=utf-8")
             if url.path.startswith("/static/"):
                 return self._static(url.path[len("/static/"):])
